@@ -2,8 +2,14 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Support Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="SupportHub">
+<meta name="theme-color" content="#1e1b4b">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icon-192.svg">
+<title>SupportHub</title>
 <style>
   :root {
     --bg: #f8fafc; --surface: #ffffff; --border: #e2e8f0;
@@ -141,14 +147,32 @@
   .api-key-box { font-family: monospace; font-size: 12px; background: var(--bg); border: 1px solid var(--border); padding: 6px 10px; border-radius: 6px; word-break: break-all; }
 
   /* ── Responsive ─────────────────── */
+  /* ── Mobile Bottom Nav ────────── */
   @media (max-width: 768px) {
-    .sidebar { width: 100%; position: relative; height: auto; flex-direction: row; flex-wrap: wrap; padding: 12px; }
-    .sidebar .logo { padding: 0 12px 0 0; margin-bottom: 0; border: none; }
-    .sidebar nav { display: flex; gap: 0; flex-wrap: wrap; }
-    .sidebar nav a { padding: 8px 12px; }
+    .sidebar { width: 100%; position: fixed; top: auto; bottom: 0; left: 0; right: 0; height: 60px;
+      flex-direction: row; padding: 0; z-index: 100; border-top: 1px solid rgba(255,255,255,.15);
+      background: #1e1b4b; }
+    .sidebar .logo { display: none; }
+    .sidebar nav { display: flex; width: 100%; }
+    .sidebar nav a { flex: 1; padding: 10px 0; justify-content: center; font-size: 11px;
+      flex-direction: column; gap: 2px; text-align: center; }
+    .sidebar nav a svg { margin: 0 auto; }
     .sidebar .spacer, .sidebar .user-info { display: none; }
-    .main { margin-left: 0; padding: 16px; }
+    .main { margin-left: 0; padding: 16px 12px 80px; }
+    .ticket-row { flex-wrap: wrap; }
     .ticket-row .meta { display: none; }
+    .ticket-row .subject .preview { display: none; }
+    .stats-grid { grid-template-columns: repeat(2, 1fr); }
+    .ticket-header { flex-direction: column; }
+    .ticket-actions { width: 100%; }
+    .filters { flex-direction: column; }
+    .filters input[type=text], .filters select { width: 100%; min-width: unset; }
+    .page-title { font-size: 18px; }
+    .login-card { padding: 24px; }
+
+    /* Standalone PWA - safe area padding */
+    body { padding-top: env(safe-area-inset-top); }
+    .sidebar { padding-bottom: env(safe-area-inset-bottom); }
   }
 </style>
 </head>
@@ -629,6 +653,11 @@ function timeAgo(date) {
 
 // ── Init ───────────────────────────────────────────────────────────
 checkAuth();
+
+// ── Service Worker ─────────────────────────────────────────────────
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
 </script>
 </body>
 </html>
