@@ -634,9 +634,9 @@ app.get('*', (req, res) => {
 
 // ── Start ───────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 4500;
-initDB().then(() => {
-  app.listen(PORT, () => console.log(`Support Dashboard running on port ${PORT}`));
-}).catch(e => {
-  console.error('Failed to initialize database:', e);
-  process.exit(1);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Support Dashboard running on port ${PORT}`);
+  initDB().catch(e => {
+    console.error('Failed to initialize database:', e);
+  });
 });
