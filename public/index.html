@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Support Dashboard</title>
+<style>
+  :root {
+    --bg: #f8fafc; --surface: #ffffff; --border: #e2e8f0;
+    --text: #1e293b; --muted: #64748b; --accent: #6366f1;
+    --accent-light: #eef2ff; --success: #22c55e; --warn: #f59e0b;
+    --danger: #ef4444; --info: #3b82f6; --radius: 10px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+  a { color: var(--accent); text-decoration: none; }
+
+  /* ── Login ──────────────────────── */
+  .login-wrap { display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 20px; }
+  .login-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 40px; max-width: 400px; width: 100%; box-shadow: 0 4px 24px rgba(0,0,0,.06); }
+  .login-card h1 { font-size: 22px; margin-bottom: 6px; }
+  .login-card p { color: var(--muted); font-size: 14px; margin-bottom: 24px; }
+  .login-card input { width: 100%; padding: 10px 14px; border: 1px solid var(--border); border-radius: 8px; font-size: 14px; margin-bottom: 12px; outline: none; }
+  .login-card input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-light); }
+  .login-card .btn { width: 100%; margin-top: 8px; }
+  .login-err { color: var(--danger); font-size: 13px; margin-bottom: 8px; display: none; }
+
+  /* ── Layout ─────────────────────── */
+  .app { display: flex; min-height: 100vh; }
+  .sidebar { width: 240px; background: #1e1b4b; color: #fff; padding: 20px 0; display: flex; flex-direction: column; position: fixed; top: 0; left: 0; bottom: 0; z-index: 50; }
+  .sidebar .logo { padding: 0 20px 24px; font-size: 18px; font-weight: 700; letter-spacing: -.3px; border-bottom: 1px solid rgba(255,255,255,.1); margin-bottom: 12px; }
+  .sidebar .logo span { color: #a5b4fc; }
+  .sidebar nav a { display: flex; align-items: center; gap: 10px; padding: 10px 20px; color: #c7d2fe; font-size: 14px; transition: .15s; }
+  .sidebar nav a:hover, .sidebar nav a.active { background: rgba(255,255,255,.1); color: #fff; }
+  .sidebar nav a .badge { background: var(--danger); color: #fff; font-size: 11px; padding: 1px 7px; border-radius: 10px; margin-left: auto; }
+  .sidebar .spacer { flex: 1; }
+  .sidebar .user-info { padding: 16px 20px; border-top: 1px solid rgba(255,255,255,.1); font-size: 13px; color: #a5b4fc; }
+  .sidebar .user-info strong { color: #fff; display: block; }
+
+  .main { margin-left: 240px; flex: 1; padding: 24px 32px; max-width: 1200px; }
+
+  /* ── Common ─────────────────────── */
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; border: none; border-radius: 8px; font-size: 13px; font-weight: 500; cursor: pointer; transition: .15s; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { background: #4f46e5; }
+  .btn-ghost { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+  .btn-ghost:hover { background: var(--bg); color: var(--text); }
+  .btn-danger { background: var(--danger); color: #fff; }
+  .btn-danger:hover { background: #dc2626; }
+  .btn-sm { padding: 5px 10px; font-size: 12px; }
+  .btn-success { background: var(--success); color: #fff; }
+
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; margin-bottom: 16px; }
+  .page-title { font-size: 22px; font-weight: 700; margin-bottom: 20px; }
+
+  input, textarea, select { padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 14px; font-family: inherit; outline: none; }
+  input:focus, textarea:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-light); }
+  textarea { resize: vertical; min-height: 100px; width: 100%; }
+
+  .status-badge { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .3px; }
+  .status-open { background: #fef3c7; color: #92400e; }
+  .status-in_progress { background: #dbeafe; color: #1e40af; }
+  .status-resolved { background: #dcfce7; color: #166534; }
+  .status-closed { background: #f1f5f9; color: #475569; }
+
+  .priority-badge { font-size: 11px; font-weight: 600; }
+  .priority-low { color: var(--muted); }
+  .priority-normal { color: var(--info); }
+  .priority-high { color: var(--warn); }
+  .priority-urgent { color: var(--danger); }
+
+  .type-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  .type-bug { background: #fee2e2; color: #991b1b; }
+  .type-message { background: #e0e7ff; color: #3730a3; }
+
+  .app-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .empty-state { text-align: center; padding: 60px 20px; color: var(--muted); }
+  .empty-state h3 { margin-bottom: 8px; color: var(--text); }
+  .hidden { display: none !important; }
+
+  /* ── Stats ──────────────────────── */
+  .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 24px; }
+  .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+  .stat-card .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 4px; }
+  .stat-card .value { font-size: 28px; font-weight: 700; }
+  .stat-card .value.text-warn { color: var(--warn); }
+  .stat-card .value.text-info { color: var(--info); }
+  .stat-card .value.text-success { color: var(--success); }
+
+  /* ── Filters ────────────────────── */
+  .filters { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 20px; align-items: center; }
+  .filters input[type=text] { flex: 1; min-width: 180px; }
+  .filters select { min-width: 120px; }
+
+  /* ── Ticket List ────────────────── */
+  .ticket-row { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--border); cursor: pointer; transition: .1s; }
+  .ticket-row:hover { background: var(--accent-light); }
+  .ticket-row:last-child { border-bottom: none; }
+  .ticket-row .subject { font-weight: 500; font-size: 14px; flex: 1; min-width: 0; }
+  .ticket-row .subject .preview { color: var(--muted); font-weight: 400; font-size: 13px; margin-left: 8px; }
+  .ticket-row .meta { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); flex-shrink: 0; }
+  .ticket-row .msg-count { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 1px 8px; font-size: 11px; }
+
+  /* ── Ticket Detail ──────────────── */
+  .ticket-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 24px; }
+  .ticket-header h2 { font-size: 20px; margin-bottom: 8px; }
+  .ticket-header .meta-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
+  .ticket-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+  .message-thread { margin-bottom: 24px; }
+  .msg-bubble { padding: 16px; border-radius: var(--radius); margin-bottom: 12px; }
+  .msg-bubble.user { background: #f8fafc; border: 1px solid var(--border); }
+  .msg-bubble.admin { background: var(--accent-light); border: 1px solid #c7d2fe; }
+  .msg-bubble .msg-header { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 13px; }
+  .msg-bubble .msg-header .sender { font-weight: 600; }
+  .msg-bubble .msg-header .sender.admin-sender { color: var(--accent); }
+  .msg-bubble .msg-header .time { color: var(--muted); }
+  .msg-bubble .msg-body { white-space: pre-wrap; font-size: 14px; line-height: 1.6; }
+  .msg-bubble .msg-source { font-size: 11px; color: var(--muted); margin-top: 8px; }
+
+  .note-bubble { background: #fefce8; border: 1px solid #fde68a; padding: 12px 16px; border-radius: var(--radius); margin-bottom: 8px; font-size: 13px; }
+  .note-bubble .note-header { font-size: 12px; color: #92400e; margin-bottom: 4px; }
+
+  .reply-box { margin-top: 16px; }
+  .reply-box .tabs { display: flex; gap: 0; margin-bottom: 12px; }
+  .reply-box .tab { padding: 8px 16px; font-size: 13px; font-weight: 500; cursor: pointer; border: 1px solid var(--border); background: var(--bg); color: var(--muted); }
+  .reply-box .tab:first-child { border-radius: 8px 0 0 8px; }
+  .reply-box .tab:last-child { border-radius: 0 8px 8px 0; }
+  .reply-box .tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .reply-box .actions { display: flex; gap: 8px; margin-top: 10px; }
+
+  .back-link { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); margin-bottom: 16px; cursor: pointer; }
+  .back-link:hover { color: var(--text); }
+
+  /* ── Settings ───────────────────── */
+  .app-card { display: flex; align-items: center; gap: 16px; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 12px; background: var(--surface); }
+  .app-card .app-icon { width: 40px; height: 40px; border-radius: 10px; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 700; font-size: 16px; }
+  .app-card .app-info { flex: 1; }
+  .app-card .app-info h4 { font-size: 15px; margin-bottom: 2px; }
+  .app-card .app-info p { font-size: 12px; color: var(--muted); }
+  .api-key-box { font-family: monospace; font-size: 12px; background: var(--bg); border: 1px solid var(--border); padding: 6px 10px; border-radius: 6px; word-break: break-all; }
+
+  /* ── Responsive ─────────────────── */
+  @media (max-width: 768px) {
+    .sidebar { width: 100%; position: relative; height: auto; flex-direction: row; flex-wrap: wrap; padding: 12px; }
+    .sidebar .logo { padding: 0 12px 0 0; margin-bottom: 0; border: none; }
+    .sidebar nav { display: flex; gap: 0; flex-wrap: wrap; }
+    .sidebar nav a { padding: 8px 12px; }
+    .sidebar .spacer, .sidebar .user-info { display: none; }
+    .main { margin-left: 0; padding: 16px; }
+    .ticket-row .meta { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ════ LOGIN ════ -->
+<div id="loginView" class="login-wrap">
+  <div class="login-card">
+    <h1>Support Dashboard</h1>
+    <p>Sign in to manage tickets across all your apps.</p>
+    <div id="loginErr" class="login-err"></div>
+    <input id="loginEmail" type="email" placeholder="Email" autofocus>
+    <input id="loginPass" type="password" placeholder="Password" onkeydown="if(event.key==='Enter')doLogin()">
+    <button class="btn btn-primary" onclick="doLogin()">Sign In</button>
+  </div>
+</div>
+
+<!-- ════ APP ════ -->
+<div id="appView" class="app hidden">
+  <aside class="sidebar">
+    <div class="logo">Support<span>Hub</span></div>
+    <nav>
+      <a href="#" data-page="dashboard" class="active" onclick="showPage('dashboard')">
+        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="12" height="12" rx="2"/><path d="M2 8h12M8 2v12"/></svg>
+        Dashboard
+      </a>
+      <a href="#" data-page="tickets" onclick="showPage('tickets')">
+        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h8M4 8h8M4 12h5"/></svg>
+        Tickets
+        <span id="openBadge" class="badge hidden">0</span>
+      </a>
+      <a href="#" data-page="settings" onclick="showPage('settings')">
+        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="8" cy="8" r="3"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M3 13l1.5-1.5M11.5 4.5L13 3"/></svg>
+        Settings
+      </a>
+    </nav>
+    <div class="spacer"></div>
+    <div class="user-info">
+      <strong id="adminName">Admin</strong>
+      <span id="adminEmail">admin@example.com</span>
+      <a href="#" style="color:#a5b4fc;display:block;margin-top:8px;font-size:12px;" onclick="doLogout()">Sign out</a>
+    </div>
+  </aside>
+
+  <div class="main">
+    <!-- ── Dashboard Page ── -->
+    <div id="pageDashboard">
+      <h1 class="page-title">Dashboard</h1>
+      <div class="stats-grid" id="statsGrid"></div>
+      <h3 style="margin-bottom:12px;font-size:16px;">Recent Open Tickets</h3>
+      <div class="card" style="padding:0;overflow:hidden;" id="recentTickets"></div>
+    </div>
+
+    <!-- ── Tickets Page ── -->
+    <div id="pageTickets" class="hidden">
+      <h1 class="page-title">All Tickets</h1>
+      <div class="filters">
+        <input type="text" id="searchInput" placeholder="Search by name, email, subject..." oninput="debounceLoadTickets()">
+        <select id="filterStatus" onchange="loadTickets()">
+          <option value="all">All Status</option>
+          <option value="open" selected>Open</option>
+          <option value="in_progress">In Progress</option>
+          <option value="resolved">Resolved</option>
+          <option value="closed">Closed</option>
+        </select>
+        <select id="filterApp" onchange="loadTickets()"></select>
+        <select id="filterType" onchange="loadTickets()">
+          <option value="all">All Types</option>
+          <option value="bug">Bug</option>
+          <option value="message">Message</option>
+        </select>
+      </div>
+      <div class="card" style="padding:0;overflow:hidden;" id="ticketsList"></div>
+    </div>
+
+    <!-- ── Ticket Detail Page ── -->
+    <div id="pageTicketDetail" class="hidden">
+      <div class="back-link" onclick="showPage('tickets')">&#8592; Back to tickets</div>
+      <div id="ticketDetail"></div>
+    </div>
+
+    <!-- ── Settings Page ── -->
+    <div id="pageSettings" class="hidden">
+      <h1 class="page-title">Settings</h1>
+      <div class="card">
+        <h3 style="margin-bottom:16px;">Connected Apps</h3>
+        <p style="font-size:13px;color:var(--muted);margin-bottom:16px;">
+          Each app uses its API key to send tickets to this dashboard. Add the key to the app's environment variables.
+        </p>
+        <div id="appsList"></div>
+        <hr style="border:0;border-top:1px solid var(--border);margin:20px 0;">
+        <h4 style="margin-bottom:12px;">Add New App</h4>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;">
+          <div>
+            <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px;">App Name</label>
+            <input id="newAppName" placeholder="My App">
+          </div>
+          <div>
+            <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px;">Slug</label>
+            <input id="newAppSlug" placeholder="my-app">
+          </div>
+          <div>
+            <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px;">Color</label>
+            <input id="newAppColor" type="color" value="#6366f1" style="padding:2px;height:38px;width:50px;">
+          </div>
+          <button class="btn btn-primary" onclick="addApp()">Add App</button>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:16px;">
+        <h3 style="margin-bottom:16px;">Integration Guide</h3>
+        <p style="font-size:14px;line-height:1.7;">
+          To connect an app to this dashboard, add the following to the app's support submission endpoint:
+        </p>
+        <pre style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:16px;font-size:13px;overflow-x:auto;margin-top:12px;line-height:1.6;">
+// After saving the support message locally, forward to dashboard:
+fetch('YOUR_DASHBOARD_URL/api/hooks/ticket', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'X-API-Key': 'YOUR_APP_API_KEY'
+  },
+  body: JSON.stringify({
+    externalId: localMessageId,
+    tenantId: tenantId,
+    fromEmail: userEmail,
+    fromName: userName,
+    type: 'message', // or 'bug'
+    subject: subject,
+    body: messageBody
+  })
+});</pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────
+let STATE = { admin: null, apps: [] };
+let debounceTimer = null;
+
+// ── API Helper ─────────────────────────────────────────────────────
+async function api(method, path, body) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' }, credentials: 'include' };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(path, opts);
+  return res.json();
+}
+
+// ── Auth ───────────────────────────────────────────────────────────
+async function checkAuth() {
+  const r = await api('GET', '/api/auth/me');
+  if (r.ok) {
+    STATE.admin = r.admin;
+    document.getElementById('loginView').classList.add('hidden');
+    document.getElementById('appView').classList.remove('hidden');
+    document.getElementById('adminName').textContent = r.admin.name || 'Admin';
+    document.getElementById('adminEmail').textContent = r.admin.email;
+    loadDashboard();
+    loadApps();
+  }
+}
+
+async function doLogin() {
+  const email = document.getElementById('loginEmail').value.trim();
+  const pass = document.getElementById('loginPass').value;
+  const errEl = document.getElementById('loginErr');
+  errEl.style.display = 'none';
+  if (!email || !pass) { errEl.textContent = 'Please enter email and password'; errEl.style.display = 'block'; return; }
+  const r = await api('POST', '/api/auth/login', { email, password: pass });
+  if (r.ok) {
+    STATE.admin = r.admin;
+    document.getElementById('loginView').classList.add('hidden');
+    document.getElementById('appView').classList.remove('hidden');
+    document.getElementById('adminName').textContent = r.admin.name || 'Admin';
+    document.getElementById('adminEmail').textContent = r.admin.email;
+    loadDashboard();
+    loadApps();
+  } else {
+    errEl.textContent = r.reason || 'Login failed';
+    errEl.style.display = 'block';
+  }
+}
+
+async function doLogout() {
+  await api('POST', '/api/auth/logout');
+  STATE.admin = null;
+  document.getElementById('appView').classList.add('hidden');
+  document.getElementById('loginView').classList.remove('hidden');
+}
+
+// ── Navigation ─────────────────────────────────────────────────────
+function showPage(page) {
+  ['Dashboard', 'Tickets', 'TicketDetail', 'Settings'].forEach(p => {
+    document.getElementById('page' + p).classList.add('hidden');
+  });
+  document.querySelectorAll('.sidebar nav a').forEach(a => a.classList.remove('active'));
+
+  if (page === 'dashboard') {
+    document.getElementById('pageDashboard').classList.remove('hidden');
+    document.querySelector('[data-page=dashboard]').classList.add('active');
+    loadDashboard();
+  } else if (page === 'tickets') {
+    document.getElementById('pageTickets').classList.remove('hidden');
+    document.querySelector('[data-page=tickets]').classList.add('active');
+    loadTickets();
+  } else if (page === 'ticketDetail') {
+    document.getElementById('pageTicketDetail').classList.remove('hidden');
+    document.querySelector('[data-page=tickets]').classList.add('active');
+  } else if (page === 'settings') {
+    document.getElementById('pageSettings').classList.remove('hidden');
+    document.querySelector('[data-page=settings]').classList.add('active');
+    loadApps();
+  }
+}
+
+// ── Dashboard ──────────────────────────────────────────────────────
+async function loadDashboard() {
+  const r = await api('GET', '/api/stats');
+  if (!r.ok) return;
+  const s = r.stats;
+
+  // Update open badge
+  const badge = document.getElementById('openBadge');
+  const openCount = parseInt(s.open_count) || 0;
+  if (openCount > 0) { badge.textContent = openCount; badge.classList.remove('hidden'); }
+  else { badge.classList.add('hidden'); }
+
+  document.getElementById('statsGrid').innerHTML = `
+    <div class="stat-card">
+      <div class="label">Open</div>
+      <div class="value text-warn">${s.open_count}</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">In Progress</div>
+      <div class="value text-info">${s.in_progress_count}</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Resolved</div>
+      <div class="value text-success">${s.resolved_count}</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Today</div>
+      <div class="value">${s.today_count}</div>
+    </div>
+    ${r.byApp.map(a => `
+      <div class="stat-card">
+        <div class="label"><span class="app-dot" style="background:${a.color}"></span>${a.name}</div>
+        <div class="value">${a.count} <span style="font-size:14px;color:var(--muted);">(${a.open_count} open)</span></div>
+      </div>
+    `).join('')}
+  `;
+
+  // Recent open tickets
+  const tr = await api('GET', '/api/tickets?status=open');
+  if (tr.ok) renderTicketList('recentTickets', tr.tickets.slice(0, 10));
+}
+
+// ── Tickets ────────────────────────────────────────────────────────
+function debounceLoadTickets() {
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(loadTickets, 300);
+}
+
+async function loadTickets() {
+  const params = new URLSearchParams();
+  const status = document.getElementById('filterStatus').value;
+  const appSlug = document.getElementById('filterApp').value;
+  const type = document.getElementById('filterType').value;
+  const search = document.getElementById('searchInput').value.trim();
+
+  if (status !== 'all') params.set('status', status);
+  if (appSlug !== 'all') params.set('app', appSlug);
+  if (type !== 'all') params.set('type', type);
+  if (search) params.set('search', search);
+
+  const r = await api('GET', '/api/tickets?' + params.toString());
+  if (r.ok) renderTicketList('ticketsList', r.tickets);
+}
+
+function renderTicketList(containerId, tickets) {
+  const el = document.getElementById(containerId);
+  if (tickets.length === 0) {
+    el.innerHTML = '<div class="empty-state"><h3>No tickets found</h3><p>Adjust your filters or wait for new tickets.</p></div>';
+    return;
+  }
+  el.innerHTML = tickets.map(t => `
+    <div class="ticket-row" onclick="openTicket('${t.id}')">
+      <span class="app-dot" style="background:${t.app_color || '#6366f1'}" title="${t.app_name || ''}"></span>
+      <span class="type-badge type-${t.type}">${t.type}</span>
+      <div class="subject">
+        ${esc(t.subject || '(no subject)')}
+        <span class="preview">${esc((t.first_message || '').substring(0, 60))}</span>
+      </div>
+      <div class="meta">
+        <span>${esc(t.from_name || t.from_email)}</span>
+        <span class="status-badge status-${t.status}">${t.status.replace('_', ' ')}</span>
+        <span class="priority-badge priority-${t.priority}">${t.priority}</span>
+        <span class="msg-count">${t.message_count} msg</span>
+        <span>${timeAgo(t.updated_at)}</span>
+      </div>
+    </div>
+  `).join('');
+}
+
+// ── Ticket Detail ──────────────────────────────────────────────────
+async function openTicket(id) {
+  showPage('ticketDetail');
+  const el = document.getElementById('ticketDetail');
+  el.innerHTML = '<p style="color:var(--muted);">Loading...</p>';
+
+  const r = await api('GET', '/api/tickets/' + id);
+  if (!r.ok) { el.innerHTML = '<p>Failed to load ticket.</p>'; return; }
+
+  const t = r.ticket;
+  const msgs = r.messages;
+  const notes = r.notes;
+
+  el.innerHTML = `
+    <div class="ticket-header">
+      <div>
+        <h2>${esc(t.subject || '(no subject)')}</h2>
+        <div class="meta-row">
+          <span class="app-dot" style="background:${t.app_color || '#6366f1'}"></span>
+          <span>${esc(t.app_name || 'Unknown App')}</span>
+          <span>&middot;</span>
+          <span class="type-badge type-${t.type}">${t.type}</span>
+          <span>&middot;</span>
+          <span>${esc(t.from_name || '')} &lt;${esc(t.from_email)}&gt;</span>
+          <span>&middot;</span>
+          <span>${new Date(t.created_at).toLocaleString()}</span>
+        </div>
+      </div>
+      <div class="ticket-actions">
+        <select id="statusSelect" onchange="updateTicket('${t.id}','status',this.value)" style="font-size:13px;">
+          ${['open','in_progress','resolved','closed'].map(s =>
+            `<option value="${s}" ${s===t.status?'selected':''}>${s.replace('_',' ')}</option>`
+          ).join('')}
+        </select>
+        <select id="prioritySelect" onchange="updateTicket('${t.id}','priority',this.value)" style="font-size:13px;">
+          ${['low','normal','high','urgent'].map(p =>
+            `<option value="${p}" ${p===t.priority?'selected':''}>${p}</option>`
+          ).join('')}
+        </select>
+        <button class="btn btn-danger btn-sm" onclick="deleteTicket('${t.id}')">Delete</button>
+      </div>
+    </div>
+
+    <div class="message-thread">
+      ${msgs.map(m => `
+        <div class="msg-bubble ${m.sender_type}">
+          <div class="msg-header">
+            <span class="sender ${m.sender_type === 'admin' ? 'admin-sender' : ''}">${esc(m.sender_name || m.sender_email || m.sender_type)}</span>
+            <span class="time">${new Date(m.created_at).toLocaleString()}</span>
+          </div>
+          <div class="msg-body">${esc(m.body)}</div>
+          ${m.source !== 'app' ? `<div class="msg-source">via ${m.source}</div>` : ''}
+        </div>
+      `).join('')}
+    </div>
+
+    ${notes.length > 0 ? `
+      <h4 style="margin-bottom:8px;color:var(--muted);font-size:13px;">Internal Notes</h4>
+      ${notes.map(n => `
+        <div class="note-bubble">
+          <div class="note-header">${esc(n.admin_name || 'Admin')} &middot; ${new Date(n.created_at).toLocaleString()}</div>
+          ${esc(n.body)}
+        </div>
+      `).join('')}
+    ` : ''}
+
+    <div class="reply-box">
+      <div class="tabs">
+        <div class="tab active" onclick="switchReplyTab(this,'reply')">Reply to User</div>
+        <div class="tab" onclick="switchReplyTab(this,'note')">Internal Note</div>
+      </div>
+      <textarea id="replyBody" placeholder="Type your reply..."></textarea>
+      <div class="actions">
+        <button class="btn btn-primary" id="replyBtn" onclick="sendReply('${t.id}')">Send Reply</button>
+        <button class="btn btn-ghost hidden" id="noteBtn" onclick="sendNote('${t.id}')">Add Note</button>
+      </div>
+    </div>
+  `;
+}
+
+let replyMode = 'reply';
+function switchReplyTab(el, mode) {
+  replyMode = mode;
+  el.parentElement.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('replyBody').placeholder = mode === 'reply' ? 'Type your reply...' : 'Add an internal note...';
+  document.getElementById('replyBtn').classList.toggle('hidden', mode === 'note');
+  document.getElementById('noteBtn').classList.toggle('hidden', mode === 'reply');
+}
+
+async function sendReply(ticketId) {
+  const body = document.getElementById('replyBody').value.trim();
+  if (!body) return;
+  const r = await api('POST', `/api/tickets/${ticketId}/reply`, { body });
+  if (r.ok) { openTicket(ticketId); } else { alert(r.reason || 'Failed'); }
+}
+
+async function sendNote(ticketId) {
+  const body = document.getElementById('replyBody').value.trim();
+  if (!body) return;
+  const r = await api('POST', `/api/tickets/${ticketId}/note`, { body });
+  if (r.ok) { openTicket(ticketId); } else { alert(r.reason || 'Failed'); }
+}
+
+async function updateTicket(id, field, value) {
+  await api('PATCH', `/api/tickets/${id}`, { [field]: value });
+}
+
+async function deleteTicket(id) {
+  if (!confirm('Delete this ticket permanently?')) return;
+  const r = await api('DELETE', `/api/tickets/${id}`);
+  if (r.ok) showPage('tickets');
+}
+
+// ── Settings / Apps ────────────────────────────────────────────────
+async function loadApps() {
+  const r = await api('GET', '/api/apps');
+  if (!r.ok) return;
+  STATE.apps = r.apps;
+
+  // Populate filter dropdown
+  const filterEl = document.getElementById('filterApp');
+  filterEl.innerHTML = '<option value="all">All Apps</option>' +
+    r.apps.map(a => `<option value="${a.slug}">${a.name}</option>`).join('');
+
+  // Render settings page app list
+  const listEl = document.getElementById('appsList');
+  if (!listEl) return;
+  listEl.innerHTML = r.apps.map(a => `
+    <div class="app-card">
+      <div class="app-icon" style="background:${a.color}">${a.name[0]}</div>
+      <div class="app-info">
+        <h4>${esc(a.name)}</h4>
+        <p>Slug: ${esc(a.slug)}</p>
+      </div>
+      <div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:4px;">API Key</div>
+        <div class="api-key-box">${esc(a.api_key)}</div>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function addApp() {
+  const name = document.getElementById('newAppName').value.trim();
+  const slug = document.getElementById('newAppSlug').value.trim();
+  const color = document.getElementById('newAppColor').value;
+  if (!name || !slug) { alert('Name and slug are required'); return; }
+  const r = await api('POST', '/api/apps', { name, slug, color });
+  if (r.ok) { loadApps(); document.getElementById('newAppName').value = ''; document.getElementById('newAppSlug').value = ''; }
+  else { alert(r.reason || 'Failed'); }
+}
+
+// ── Helpers ────────────────────────────────────────────────────────
+function esc(s) {
+  if (!s) return '';
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function timeAgo(date) {
+  const now = Date.now();
+  const d = new Date(date).getTime();
+  const diff = Math.floor((now - d) / 1000);
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+  if (diff < 604800) return Math.floor(diff / 86400) + 'd ago';
+  return new Date(date).toLocaleDateString();
+}
+
+// ── Init ───────────────────────────────────────────────────────────
+checkAuth();
+</script>
+</body>
+</html>
