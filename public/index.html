@@ -226,6 +226,10 @@
         Tickets
         <span id="openBadge" class="badge hidden">0</span>
       </a>
+      <a href="#" data-page="tenants" onclick="showPage('tenants')">
+        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h12M2 7h12M2 11h8"/><circle cx="14" cy="11" r="2"/></svg>
+        Tenants
+      </a>
       <a href="#" data-page="settings" onclick="showPage('settings')">
         <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="8" cy="8" r="3"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M3 13l1.5-1.5M11.5 4.5L13 3"/></svg>
         Settings
@@ -281,6 +285,109 @@
     </div>
 
     <!-- ── Settings Page ── -->
+    <!-- ── Tenants Page ── -->
+    <div id="pageTenants" class="hidden">
+      <h1 class="page-title">Tenants</h1>
+
+      <!-- Add Tenant -->
+      <div class="card">
+        <h3 style="margin-bottom:12px;">Add Tenant</h3>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin-bottom:10px;">
+          <div>
+            <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px;">Business Name *</label>
+            <input id="newTenantName" placeholder="Studio Name" style="width:100%;">
+          </div>
+          <div>
+            <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px;">Slug</label>
+            <input id="newTenantSlug" placeholder="studio-name" style="width:100%;">
+          </div>
+          <div>
+            <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px;">Owner Email</label>
+            <input id="newTenantEmail" type="email" placeholder="owner@studio.com" style="width:100%;">
+          </div>
+          <div>
+            <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px;">App</label>
+            <select id="newTenantApp" style="width:100%;"></select>
+          </div>
+          <div>
+            <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px;">Plan</label>
+            <select id="newTenantPlan" style="width:100%;">
+              <option value="starter">Starter ($39/mo)</option>
+              <option value="studio">Studio ($79/mo)</option>
+              <option value="enterprise">Enterprise (Custom)</option>
+            </select>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <button class="btn btn-primary" onclick="addTenant()">Add Tenant</button>
+          <div id="addTenantMsg" style="font-size:13px;"></div>
+        </div>
+      </div>
+
+      <!-- Tenant List -->
+      <div class="card" style="padding:0;overflow:hidden;">
+        <div style="padding:16px 20px;border-bottom:1px solid var(--border);">
+          <h3 style="margin:0;">All Tenants</h3>
+        </div>
+        <div id="tenantsList"></div>
+      </div>
+
+      <!-- Tenant Detail (edit/stripe link) -->
+      <div id="tenantDetail" class="card hidden">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+          <h3 id="tenantDetailName" style="margin:0;">Tenant</h3>
+          <button class="btn btn-ghost btn-sm" onclick="closeTenantDetail()">Close</button>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px;">
+          <div>
+            <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px;">Business Name</label>
+            <input id="editTenantName" style="width:100%;">
+          </div>
+          <div>
+            <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px;">Owner Email</label>
+            <input id="editTenantEmail" style="width:100%;">
+          </div>
+          <div>
+            <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px;">Plan</label>
+            <select id="editTenantPlan" style="width:100%;">
+              <option value="starter">Starter</option>
+              <option value="studio">Studio</option>
+              <option value="enterprise">Enterprise</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px;">Slug</label>
+            <input id="editTenantSlug" style="width:100%;">
+          </div>
+        </div>
+
+        <!-- Stripe Link Section -->
+        <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px;">
+          <h4 style="margin-bottom:8px;">Stripe Billing</h4>
+          <div style="display:flex;gap:8px;align-items:flex-end;">
+            <div style="flex:1;">
+              <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px;">Stripe Customer ID</label>
+              <input id="editTenantStripe" placeholder="cus_xxxxxxxxx" style="width:100%;font-family:monospace;">
+            </div>
+            <button class="btn btn-primary btn-sm" onclick="saveTenantStripe()">Link</button>
+          </div>
+          <div id="tenantStripeStatus" style="font-size:12px;color:var(--muted);margin-top:6px;"></div>
+        </div>
+
+        <!-- Notes -->
+        <div>
+          <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px;">Notes</label>
+          <textarea id="editTenantNotes" placeholder="Internal notes about this tenant..." style="min-height:60px;"></textarea>
+        </div>
+
+        <div style="display:flex;gap:8px;margin-top:12px;">
+          <button class="btn btn-primary" onclick="saveTenantEdits()">Save Changes</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteTenant()" style="margin-left:auto;">Delete</button>
+          <div id="editTenantMsg" style="font-size:13px;align-self:center;"></div>
+        </div>
+      </div>
+    </div>
+
     <div id="pageSettings" class="hidden">
       <h1 class="page-title">Settings</h1>
       <div class="card">
@@ -393,7 +500,7 @@ async function doLogout() {
 
 // ── Navigation ─────────────────────────────────────────────────────
 function showPage(page) {
-  ['Dashboard', 'Tickets', 'TicketDetail', 'Settings'].forEach(p => {
+  ['Dashboard', 'Tickets', 'TicketDetail', 'Tenants', 'Settings'].forEach(p => {
     document.getElementById('page' + p).classList.add('hidden');
   });
   document.querySelectorAll('.sidebar nav a').forEach(a => a.classList.remove('active'));
@@ -409,6 +516,10 @@ function showPage(page) {
   } else if (page === 'ticketDetail') {
     document.getElementById('pageTicketDetail').classList.remove('hidden');
     document.querySelector('[data-page=tickets]').classList.add('active');
+  } else if (page === 'tenants') {
+    document.getElementById('pageTenants').classList.remove('hidden');
+    document.querySelector('[data-page=tenants]').classList.add('active');
+    loadTenants();
   } else if (page === 'settings') {
     document.getElementById('pageSettings').classList.remove('hidden');
     document.querySelector('[data-page=settings]').classList.add('active');
@@ -656,6 +767,149 @@ async function addApp() {
   const r = await api('POST', '/api/apps', { name, slug, color });
   if (r.ok) { loadApps(); document.getElementById('newAppName').value = ''; document.getElementById('newAppSlug').value = ''; }
   else { alert(r.reason || 'Failed'); }
+}
+
+// ── Tenants ────────────────────────────────────────────────────────
+let _tenants = [];
+let _editTenantId = null;
+
+async function loadTenants() {
+  const r = await api('GET', '/api/tenants');
+  if (!r.ok) return;
+  _tenants = r.tenants;
+
+  // Populate app dropdown for new tenant form
+  const appSelect = document.getElementById('newTenantApp');
+  if (appSelect && STATE.apps.length > 0) {
+    appSelect.innerHTML = '<option value="">— Select App —</option>' +
+      STATE.apps.map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('');
+  }
+
+  const el = document.getElementById('tenantsList');
+  if (r.tenants.length === 0) {
+    el.innerHTML = '<div class="empty-state"><h3>No tenants yet</h3><p>Add your first tenant above.</p></div>';
+    return;
+  }
+
+  el.innerHTML = r.tenants.map(t => {
+    const planColors = { starter: 'var(--warn)', studio: 'var(--accent)', enterprise: 'var(--success)' };
+    const planColor = planColors[t.plan_name] || 'var(--muted)';
+    const hasStripe = t.stripe_customer_id ? '<span style="color:var(--success);font-size:11px;">Stripe linked</span>' : '<span style="color:var(--muted);font-size:11px;">No Stripe</span>';
+    return `
+      <div class="ticket-row" onclick="openTenantDetail(${t.id})">
+        <span class="app-dot" style="background:${t.app_color || '#6366f1'}" title="${esc(t.app_name || '')}"></span>
+        <div class="subject">
+          ${esc(t.name)}
+          <span class="preview">${esc(t.owner_email || '')}</span>
+        </div>
+        <div class="meta">
+          <span style="color:${planColor};font-weight:600;font-size:12px;text-transform:capitalize;">${t.plan_name || 'starter'}</span>
+          ${hasStripe}
+          <span>${esc(t.app_name || '')}</span>
+          <span>${timeAgo(t.created_at)}</span>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+async function addTenant() {
+  const name = document.getElementById('newTenantName').value.trim();
+  const slug = document.getElementById('newTenantSlug').value.trim();
+  const email = document.getElementById('newTenantEmail').value.trim();
+  const appId = document.getElementById('newTenantApp').value;
+  const plan = document.getElementById('newTenantPlan').value;
+  const msgEl = document.getElementById('addTenantMsg');
+
+  if (!name) { msgEl.textContent = 'Name required'; msgEl.style.color = 'var(--danger)'; return; }
+
+  const r = await api('POST', '/api/tenants', {
+    name, slug, ownerEmail: email, appId: appId || null, planName: plan
+  });
+  if (r.ok) {
+    msgEl.textContent = 'Added!'; msgEl.style.color = 'var(--success)';
+    document.getElementById('newTenantName').value = '';
+    document.getElementById('newTenantSlug').value = '';
+    document.getElementById('newTenantEmail').value = '';
+    loadTenants();
+    setTimeout(() => { msgEl.textContent = ''; }, 2000);
+  } else {
+    msgEl.textContent = r.reason || 'Failed'; msgEl.style.color = 'var(--danger)';
+  }
+}
+
+function openTenantDetail(id) {
+  const t = _tenants.find(x => x.id === id);
+  if (!t) return;
+  _editTenantId = id;
+
+  document.getElementById('tenantDetail').classList.remove('hidden');
+  document.getElementById('tenantDetailName').textContent = t.name;
+  document.getElementById('editTenantName').value = t.name || '';
+  document.getElementById('editTenantEmail').value = t.owner_email || '';
+  document.getElementById('editTenantPlan').value = t.plan_name || 'starter';
+  document.getElementById('editTenantSlug').value = t.slug || '';
+  document.getElementById('editTenantStripe').value = t.stripe_customer_id || '';
+  document.getElementById('editTenantNotes').value = t.notes || '';
+
+  const stripeStatus = document.getElementById('tenantStripeStatus');
+  if (t.stripe_customer_id) {
+    stripeStatus.innerHTML = '<span style="color:var(--success);">Linked: ' + esc(t.stripe_customer_id) + '</span>';
+  } else {
+    stripeStatus.textContent = 'Not linked yet';
+  }
+
+  document.getElementById('editTenantMsg').textContent = '';
+}
+
+function closeTenantDetail() {
+  document.getElementById('tenantDetail').classList.add('hidden');
+  _editTenantId = null;
+}
+
+async function saveTenantEdits() {
+  if (!_editTenantId) return;
+  const msgEl = document.getElementById('editTenantMsg');
+  const r = await api('PATCH', `/api/tenants/${_editTenantId}`, {
+    name: document.getElementById('editTenantName').value.trim(),
+    ownerEmail: document.getElementById('editTenantEmail').value.trim(),
+    planName: document.getElementById('editTenantPlan').value,
+    slug: document.getElementById('editTenantSlug').value.trim(),
+    notes: document.getElementById('editTenantNotes').value.trim()
+  });
+  if (r.ok) {
+    msgEl.textContent = 'Saved!'; msgEl.style.color = 'var(--success)';
+    loadTenants();
+    setTimeout(() => { msgEl.textContent = ''; }, 2000);
+  } else {
+    msgEl.textContent = r.reason || 'Failed'; msgEl.style.color = 'var(--danger)';
+  }
+}
+
+async function saveTenantStripe() {
+  if (!_editTenantId) return;
+  const stripeId = document.getElementById('editTenantStripe').value.trim();
+  const statusEl = document.getElementById('tenantStripeStatus');
+
+  if (!stripeId) { statusEl.innerHTML = '<span style="color:var(--danger);">Enter a customer ID</span>'; return; }
+
+  const r = await api('POST', `/api/tenants/${_editTenantId}/sync-stripe`, {
+    stripeCustomerId: stripeId
+  });
+  if (r.ok) {
+    statusEl.innerHTML = '<span style="color:var(--success);">Linked: ' + esc(stripeId) + '</span>';
+    loadTenants();
+  } else {
+    statusEl.innerHTML = '<span style="color:var(--danger);">' + esc(r.reason || 'Failed') + '</span>';
+  }
+}
+
+async function deleteTenant() {
+  if (!_editTenantId || !confirm('Delete this tenant? This cannot be undone.')) return;
+  const r = await api('DELETE', `/api/tenants/${_editTenantId}`);
+  if (r.ok) {
+    closeTenantDetail();
+    loadTenants();
+  }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────

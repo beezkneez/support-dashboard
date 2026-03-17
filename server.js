@@ -126,6 +126,27 @@ async function initDB() {
       )
     `);
 
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS tenants (
+        id                    SERIAL PRIMARY KEY,
+        app_id                INTEGER REFERENCES apps(id) ON DELETE SET NULL,
+        name                  TEXT NOT NULL,
+        slug                  TEXT,
+        owner_email           TEXT,
+        plan_name             TEXT DEFAULT 'starter',
+        stripe_customer_id    TEXT,
+        stripe_subscription_id TEXT,
+        plan_price            INTEGER DEFAULT 0,
+        plan_interval         TEXT DEFAULT 'month',
+        subscription_status   TEXT DEFAULT 'active',
+        current_period_end    TIMESTAMPTZ,
+        card_brand            TEXT,
+        card_last4            TEXT,
+        notes                 TEXT,
+        created_at            TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+
     // Seed default admin if not exists
     if (process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD) {
       const existing = await client.query('SELECT id FROM admin_users WHERE email=$1', [process.env.ADMIN_EMAIL]);
@@ -603,6 +624,101 @@ app.post('/api/apps', requireAdmin, async (req, res) => {
     res.json({ ok: true, apiKey });
   } catch(e) {
     console.error('[apps]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+// ── Tenants Management ──────────────────────────────────────────────
+app.get('/api/tenants', requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT t.*, a.name as app_name, a.slug as app_slug, a.color as app_color
+       FROM tenants t LEFT JOIN apps a ON a.id=t.app_id
+       ORDER BY t.created_at DESC`
+    );
+    res.json({ ok: true, tenants: result.rows });
+  } catch(e) {
+    console.error('[tenants]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+app.post('/api/tenants', requireAdmin, async (req, res) => {
+  try {
+    const { name, slug, ownerEmail, appId, planName, notes } = req.body;
+    if (!name) return res.json({ ok: false, reason: 'name required' });
+    await pool.query(
+      `INSERT INTO tenants (name, slug, owner_email, app_id, plan_name, notes)
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [name, slug || null, ownerEmail || null, appId || null, planName || 'starter', notes || null]
+    );
+    res.json({ ok: true });
+  } catch(e) {
+    console.error('[tenants]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+app.patch('/api/tenants/:id', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, slug, ownerEmail, appId, planName, stripeCustomerId, notes } = req.body;
+
+    const sets = [];
+    const params = [];
+    let idx = 1;
+
+    if (name !== undefined) { sets.push(`name=$${idx++}`); params.push(name); }
+    if (slug !== undefined) { sets.push(`slug=$${idx++}`); params.push(slug); }
+    if (ownerEmail !== undefined) { sets.push(`owner_email=$${idx++}`); params.push(ownerEmail); }
+    if (appId !== undefined) { sets.push(`app_id=$${idx++}`); params.push(appId); }
+    if (planName !== undefined) { sets.push(`plan_name=$${idx++}`); params.push(planName); }
+    if (notes !== undefined) { sets.push(`notes=$${idx++}`); params.push(notes); }
+
+    if (stripeCustomerId !== undefined) {
+      sets.push(`stripe_customer_id=$${idx++}`);
+      params.push(stripeCustomerId);
+    }
+
+    if (sets.length === 0) return res.json({ ok: false, reason: 'Nothing to update' });
+
+    params.push(id);
+    await pool.query(`UPDATE tenants SET ${sets.join(',')} WHERE id=$${idx}`, params);
+    res.json({ ok: true });
+  } catch(e) {
+    console.error('[tenants]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+// Sync a tenant's billing info from their app's Stripe data
+app.post('/api/tenants/:id/sync-stripe', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { stripeCustomerId } = req.body;
+
+    if (!stripeCustomerId || !stripeCustomerId.startsWith('cus_'))
+      return res.json({ ok: false, reason: 'Invalid Stripe customer ID' });
+
+    // Update the tenant with the Stripe customer ID
+    await pool.query(
+      'UPDATE tenants SET stripe_customer_id=$1 WHERE id=$2',
+      [stripeCustomerId, id]
+    );
+
+    res.json({ ok: true });
+  } catch(e) {
+    console.error('[sync-stripe]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+app.delete('/api/tenants/:id', requireAdmin, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM tenants WHERE id=$1', [req.params.id]);
+    res.json({ ok: true });
+  } catch(e) {
+    console.error('[tenants]', e);
     res.json({ ok: false, reason: 'Server error' });
   }
 });
