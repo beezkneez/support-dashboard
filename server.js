@@ -9,10 +9,20 @@ const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 
 const app = express();
+
+// Health check — must be first, before any middleware
+app.get('/health', (req, res) => res.send('ok'));
+
 app.use(express.json({ limit: '5mb' }));
 app.use(cookieParser());
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Request logging
+app.use((req, res, next) => {
+  console.log(`[req] ${req.method} ${req.url}`);
+  next();
+});
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
