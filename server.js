@@ -150,6 +150,7 @@ async function initDB() {
     // Spawn tag (which studio a ticket came from) + per-app callback URL for reply-back.
     await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS spawn TEXT`).catch(()=>{});
     await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS spawn_name TEXT`).catch(()=>{});
+    await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS callback_url TEXT`).catch(()=>{});
     await client.query(`ALTER TABLE apps ADD COLUMN IF NOT EXISTS callback_url TEXT`).catch(()=>{});
     // Auto-configure the Aradia Time reply-back URL (only if not already set).
     await client.query(
@@ -254,15 +255,15 @@ app.get('/api/auth/me', requireAdmin, (req, res) => {
 // ── App Webhook Routes (called by aradia-time / kronara-build) ──────
 app.post('/api/hooks/ticket', requireApiKey, async (req, res) => {
   try {
-    const { externalId, tenantId, fromEmail, fromName, type, subject, body, spawn, spawnName } = req.body;
+    const { externalId, tenantId, fromEmail, fromName, type, subject, body, spawn, spawnName, callbackUrl } = req.body;
     if (!fromEmail || !body) return res.json({ ok: false, reason: 'fromEmail and body required' });
 
     const ticketId = uuidv4();
     await pool.query(
-      `INSERT INTO tickets (id, app_id, external_id, tenant_id, from_email, from_name, type, subject, spawn, spawn_name)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      `INSERT INTO tickets (id, app_id, external_id, tenant_id, from_email, from_name, type, subject, spawn, spawn_name, callback_url)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
       [ticketId, req.app.id, externalId || null, tenantId || null,
-       fromEmail, fromName || null, type || 'message', subject || '(no subject)', spawn || null, spawnName || null]
+       fromEmail, fromName || null, type || 'message', subject || '(no subject)', spawn || null, spawnName || null, callbackUrl || null]
     );
 
     await pool.query(
@@ -528,33 +529,16 @@ app.post('/api/tickets/:id/reply', requireAdmin, async (req, res) => {
       await pool.query(`UPDATE tickets SET updated_at=NOW() WHERE id=$1`, [id]);
     }
 
-    // Send email notification to user
-    const dashUrl = process.env.DASHBOARD_URL || 'http://localhost:4500';
-    sendMail({
-      to: t.from_email,
-      subject: `Re: ${t.subject || 'Your support request'} — ${t.app_name || 'Support'}`,
-      html: `
-        <div style="font-family:sans-serif;max-width:600px;margin:0 auto;">
-          <div style="background:${t.app_color || '#6366f1'};color:#fff;padding:16px 20px;border-radius:8px 8px 0 0;">
-            <strong>${t.app_name || 'Support'}</strong> — Reply to your ticket
-          </div>
-          <div style="border:1px solid #e5e7eb;border-top:0;padding:20px;border-radius:0 0 8px 8px;">
-            <p>Hi ${t.from_name || 'there'},</p>
-            <div style="white-space:pre-wrap;margin:16px 0;padding:16px;background:#f9fafb;border-radius:6px;">${body}</div>
-            <hr style="border:0;border-top:1px solid #e5e7eb;margin:16px 0;">
-            <p style="color:#6b7280;font-size:14px;">
-              You can reply to this ticket in the app under "My Tickets", or simply reply to this email.
-            </p>
-          </div>
-        </div>
-      `,
-      replyTo: process.env.ADMIN_EMAIL
-    });
+    // Prefer per-ticket callback URL (the exact spawn this ticket came from);
+    // fall back to the app-level one. This is what makes new spawns work
+    // automatically without per-spawn dashboard config.
+    const callbackBase = t.callback_url || t.app_callback_url;
+    const willCallback = !!(callbackBase && t.external_id && t.app_api_key);
 
     // Push the reply back into the source app so it lands in the user's in-app
-    // thread + fires their notifications. Needs the app's callback_url + external_id.
-    if (t.app_callback_url && t.external_id && t.app_api_key) {
-      fetch(t.app_callback_url.replace(/\/$/, '') + '/api/hooks/ticketReply', {
+    // thread and fires their notifications (push + email, respecting their prefs).
+    if (willCallback) {
+      fetch(callbackBase.replace(/\/$/, '') + '/api/hooks/ticketReply', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-API-Key': t.app_api_key },
         body: JSON.stringify({
@@ -564,6 +548,29 @@ app.post('/api/tickets/:id/reply', requireAdmin, async (req, res) => {
           senderEmail: req.admin.email || ''
         })
       }).catch(err => console.error('[reply→app callback]', err.message));
+    }
+
+    // Only send the dashboard's own email when the source app WON'T (no callback) —
+    // avoids the user getting two emails for one reply.
+    if (!willCallback) {
+      sendMail({
+        to: t.from_email,
+        subject: `Re: ${t.subject || 'Your support request'} — ${t.app_name || 'Support'}`,
+        html: `
+          <div style="font-family:sans-serif;max-width:600px;margin:0 auto;">
+            <div style="background:${t.app_color || '#6366f1'};color:#fff;padding:16px 20px;border-radius:8px 8px 0 0;">
+              <strong>${t.app_name || 'Support'}</strong> — Reply to your ticket
+            </div>
+            <div style="border:1px solid #e5e7eb;border-top:0;padding:20px;border-radius:0 0 8px 8px;">
+              <p>Hi ${t.from_name || 'there'},</p>
+              <div style="white-space:pre-wrap;margin:16px 0;padding:16px;background:#f9fafb;border-radius:6px;">${body}</div>
+              <hr style="border:0;border-top:1px solid #e5e7eb;margin:16px 0;">
+              <p style="color:#6b7280;font-size:14px;">Simply reply to this email to respond.</p>
+            </div>
+          </div>
+        `,
+        replyTo: process.env.ADMIN_EMAIL
+      });
     }
 
     res.json({ ok: true });
