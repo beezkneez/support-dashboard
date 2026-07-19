@@ -601,6 +601,7 @@ function renderTicketList(containerId, tickets) {
     <div class="ticket-row" onclick="openTicket('${t.id}')">
       <span class="app-dot" style="background:${t.app_color || '#6366f1'}" title="${t.app_name || ''}"></span>
       <span class="type-badge type-${t.type}">${t.type}</span>
+      ${(t.spawn_name || t.spawn) ? `<span style="display:inline-block;background:#eef2ff;color:#4338ca;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700;white-space:nowrap;">🏢 ${esc(t.spawn_name || t.spawn)}</span>` : ''}
       <div class="subject">
         ${esc(t.subject || '(no subject)')}
         <span class="preview">${esc((t.first_message || '').substring(0, 60))}</span>
@@ -636,6 +637,7 @@ async function openTicket(id) {
         <div class="meta-row">
           <span class="app-dot" style="background:${t.app_color || '#6366f1'}"></span>
           <span>${esc(t.app_name || 'Unknown App')}</span>
+          ${(t.spawn_name || t.spawn) ? `<span>&middot;</span><span style="background:#eef2ff;color:#4338ca;border-radius:6px;padding:2px 8px;font-size:12px;font-weight:700;">🏢 ${esc(t.spawn_name || t.spawn)}</span>` : ''}
           <span>&middot;</span>
           <span class="type-badge type-${t.type}">${t.type}</span>
           <span>&middot;</span>

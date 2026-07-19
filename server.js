@@ -147,6 +147,16 @@ async function initDB() {
       )
     `);
 
+    // Spawn tag (which studio a ticket came from) + per-app callback URL for reply-back.
+    await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS spawn TEXT`).catch(()=>{});
+    await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS spawn_name TEXT`).catch(()=>{});
+    await client.query(`ALTER TABLE apps ADD COLUMN IF NOT EXISTS callback_url TEXT`).catch(()=>{});
+    // Auto-configure the Aradia Time reply-back URL (only if not already set).
+    await client.query(
+      `UPDATE apps SET callback_url=$1 WHERE slug='aradia-time' AND (callback_url IS NULL OR callback_url='')`,
+      [process.env.ARADIA_CALLBACK_URL || 'https://aradiafitness.app']
+    ).catch(()=>{});
+
     // Seed default admin if not exists
     if (process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD) {
       const existing = await client.query('SELECT id FROM admin_users WHERE email=$1', [process.env.ADMIN_EMAIL]);
@@ -244,15 +254,15 @@ app.get('/api/auth/me', requireAdmin, (req, res) => {
 // ── App Webhook Routes (called by aradia-time / kronara-build) ──────
 app.post('/api/hooks/ticket', requireApiKey, async (req, res) => {
   try {
-    const { externalId, tenantId, fromEmail, fromName, type, subject, body } = req.body;
+    const { externalId, tenantId, fromEmail, fromName, type, subject, body, spawn, spawnName } = req.body;
     if (!fromEmail || !body) return res.json({ ok: false, reason: 'fromEmail and body required' });
 
     const ticketId = uuidv4();
     await pool.query(
-      `INSERT INTO tickets (id, app_id, external_id, tenant_id, from_email, from_name, type, subject)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      `INSERT INTO tickets (id, app_id, external_id, tenant_id, from_email, from_name, type, subject, spawn, spawn_name)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
       [ticketId, req.app.id, externalId || null, tenantId || null,
-       fromEmail, fromName || null, type || 'message', subject || '(no subject)']
+       fromEmail, fromName || null, type || 'message', subject || '(no subject)', spawn || null, spawnName || null]
     );
 
     await pool.query(
@@ -334,6 +344,33 @@ app.post('/api/hooks/ticket/:id/reply', requireApiKey, async (req, res) => {
     res.json({ ok: true });
   } catch(e) {
     console.error('[hooks/reply]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+// User reply forwarded from the source app, keyed by external_id (the app's own ticket id).
+app.post('/api/hooks/ticketExtReply', requireApiKey, async (req, res) => {
+  try {
+    const { externalId, fromEmail, fromName, body } = req.body;
+    if (!externalId || !body) return res.json({ ok: false, reason: 'externalId and body required' });
+    const ticket = await pool.query('SELECT * FROM tickets WHERE external_id=$1 AND app_id=$2', [externalId, req.app.id]);
+    if (ticket.rows.length === 0) return res.json({ ok: false, reason: 'Ticket not found' });
+    const id = ticket.rows[0].id;
+    await pool.query(
+      `INSERT INTO ticket_messages (ticket_id, sender_type, sender_name, sender_email, body, source)
+       VALUES ($1,'user',$2,$3,$4,'app')`,
+      [id, fromName || fromEmail, fromEmail, body]
+    );
+    await pool.query(`UPDATE tickets SET updated_at=NOW(), status='open' WHERE id=$1`, [id]);
+    sendMail({
+      to: process.env.ADMIN_EMAIL,
+      subject: `[${req.app.name}] Reply on: ${ticket.rows[0].subject || '(no subject)'}`,
+      html: `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;"><p><strong>${fromName || ''}</strong> &lt;${fromEmail}&gt; replied:</p><div style="white-space:pre-wrap;background:#f9fafb;padding:12px;border-radius:6px;">${body}</div></div>`,
+      replyTo: fromEmail
+    });
+    res.json({ ok: true });
+  } catch(e) {
+    console.error('[hooks/ticketExtReply]', e);
     res.json({ ok: false, reason: 'Server error' });
   }
 });
@@ -471,7 +508,7 @@ app.post('/api/tickets/:id/reply', requireAdmin, async (req, res) => {
     if (!body) return res.json({ ok: false, reason: 'body required' });
 
     const ticket = await pool.query(
-      'SELECT t.*, a.name as app_name, a.color as app_color FROM tickets t LEFT JOIN apps a ON a.id=t.app_id WHERE t.id=$1',
+      'SELECT t.*, a.name as app_name, a.color as app_color, a.api_key as app_api_key, a.callback_url as app_callback_url FROM tickets t LEFT JOIN apps a ON a.id=t.app_id WHERE t.id=$1',
       [id]
     );
     if (ticket.rows.length === 0) return res.json({ ok: false, reason: 'Not found' });
@@ -513,6 +550,21 @@ app.post('/api/tickets/:id/reply', requireAdmin, async (req, res) => {
       `,
       replyTo: process.env.ADMIN_EMAIL
     });
+
+    // Push the reply back into the source app so it lands in the user's in-app
+    // thread + fires their notifications. Needs the app's callback_url + external_id.
+    if (t.app_callback_url && t.external_id && t.app_api_key) {
+      fetch(t.app_callback_url.replace(/\/$/, '') + '/api/hooks/ticketReply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': t.app_api_key },
+        body: JSON.stringify({
+          externalId: t.external_id,
+          body,
+          senderName: req.admin.name || 'Support',
+          senderEmail: req.admin.email || ''
+        })
+      }).catch(err => console.error('[reply→app callback]', err.message));
+    }
 
     res.json({ ok: true });
   } catch(e) {
