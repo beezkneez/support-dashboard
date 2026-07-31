@@ -790,15 +790,25 @@ app.post('/api/apps', requireAdmin, async (req, res) => {
 app.get('/api/tenants/directory', async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT slug, name, member_name, base_url, member_url, logo_url, brand_color
-         FROM tenants
-        WHERE COALESCE(listed, TRUE) = TRUE
-          AND slug IS NOT NULL AND slug <> ''
-          AND base_url IS NOT NULL AND base_url <> ''
-          -- Drop spawns that have stopped checking in, so dead studios fall off
-          -- on their own rather than lingering as broken entries in the app.
-          AND (last_seen_at IS NULL OR last_seen_at > NOW() - INTERVAL '30 days')
-        ORDER BY name ASC`
+      // DISTINCT ON (base_url): one entry per studio deployment, keeping the
+      // most recently seen. A studio can legitimately end up with two rows —
+      // it changed its public code, or was registered by the billing flow under
+      // one slug and announced itself under another — and showing the same
+      // studio twice in the picker is worse than picking the fresher row.
+      // The stale row still ages out via the 30-day filter below.
+      `SELECT * FROM (
+         SELECT DISTINCT ON (base_url)
+                slug, name, member_name, base_url, member_url, logo_url, brand_color, last_seen_at
+           FROM tenants
+          WHERE COALESCE(listed, TRUE) = TRUE
+            AND slug IS NOT NULL AND slug <> ''
+            AND base_url IS NOT NULL AND base_url <> ''
+            -- Drop spawns that have stopped checking in, so dead studios fall
+            -- off on their own rather than lingering as broken entries.
+            AND (last_seen_at IS NULL OR last_seen_at > NOW() - INTERVAL '30 days')
+          ORDER BY base_url, last_seen_at DESC NULLS LAST
+       ) d
+       ORDER BY name ASC`
     );
 
     res.set('Cache-Control', 'public, max-age=300');

@@ -31,6 +31,8 @@ function fakeResult(sql, params) {
     return { rows: hit ? [{ id: hit.id }] : [] };
   }
   if (/FROM tenants/i.test(s) && /base_url/i.test(s) && /ORDER BY name/i.test(s)) {
+    // The stub can't execute DISTINCT ON, so return everything and let the
+    // assertions check that the SQL asks for the dedupe.
     return { rows: tenantRows.filter(t => t.listed !== false) };
   }
   return { rows: [], rowCount: 0 };
@@ -182,6 +184,12 @@ setTimeout(async () => {
       const sql = queries.filter(q => /FROM tenants/i.test(q.sql) && /ORDER BY name/i.test(q.sql)).pop();
       check("filters unlisted rows", sql && /listed/i.test(sql.sql));
       check("filters stale spawns", sql && /last_seen_at/i.test(sql.sql));
+      // One studio must never appear twice in the picker, even when it has two
+      // rows (renamed public code, or billing-created + self-announced).
+      check("dedupes by base_url", sql && /DISTINCT ON \(base_url\)/i.test(sql.sql),
+        sql && sql.sql.slice(0, 90));
+      check("keeps the most recently seen of a duplicate pair",
+        sql && /ORDER BY base_url, last_seen_at DESC/i.test(sql.sql));
     }
     {
       tenantRows = [];
