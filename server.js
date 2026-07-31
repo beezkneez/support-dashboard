@@ -147,6 +147,29 @@ async function initDB() {
       )
     `);
 
+    // ── Kronara app directory ────────────────────────────────────────────
+    // The Kronara mobile app is ONE binary serving every spawn: you open it,
+    // find your studio, and it points its WebView at that studio's deployment.
+    // For a newly spawned studio to appear WITHOUT an App Store release, the
+    // studio list has to be served from here.
+    //
+    // These columns extend `tenants` rather than living in their own table:
+    // it is the same real-world entity, and a second table would mean two
+    // answers to "which studios exist". A row is created by the billing/admin
+    // flow OR by a spawn announcing itself — whichever happens first — and the
+    // two are matched on slug.
+    await client.query(`ALTER TABLE tenants ADD COLUMN IF NOT EXISTS base_url TEXT`).catch(()=>{});
+    await client.query(`ALTER TABLE tenants ADD COLUMN IF NOT EXISTS member_url TEXT`).catch(()=>{});
+    await client.query(`ALTER TABLE tenants ADD COLUMN IF NOT EXISTS logo_url TEXT`).catch(()=>{});
+    await client.query(`ALTER TABLE tenants ADD COLUMN IF NOT EXISTS brand_color TEXT`).catch(()=>{});
+    await client.query(`ALTER TABLE tenants ADD COLUMN IF NOT EXISTS member_name TEXT`).catch(()=>{});
+    await client.query(`ALTER TABLE tenants ADD COLUMN IF NOT EXISTS build TEXT`).catch(()=>{});
+    // Operator kill switch — hide a studio from the app without touching the
+    // spawn. Deliberately never written by the self-registration hook.
+    await client.query(`ALTER TABLE tenants ADD COLUMN IF NOT EXISTS listed BOOLEAN DEFAULT TRUE`).catch(()=>{});
+    await client.query(`ALTER TABLE tenants ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ`).catch(()=>{});
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_tenants_slug ON tenants (LOWER(slug))`).catch(()=>{});
+
     // Spawn tag (which studio a ticket came from) + per-app callback URL for reply-back.
     await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS spawn TEXT`).catch(()=>{});
     await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS spawn_name TEXT`).catch(()=>{});
@@ -373,6 +396,72 @@ app.post('/api/hooks/ticketExtReply', requireApiKey, async (req, res) => {
   } catch(e) {
     console.error('[hooks/ticketExtReply]', e);
     res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+// ── Kronara app directory: a spawn announcing itself ───────────────────────
+// Called by every spawn on boot and every 6h after (announceTenantToDirectory
+// in the tenant's server.js). The repeat is what makes the directory
+// self-healing: a restore here, or a studio changing domain, recovers on its
+// own instead of needing every spawn redeployed by hand.
+app.post('/api/hooks/registerTenant', requireApiKey, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const slug = String(b.code || b.spawn || '').trim().toLowerCase();
+    const name = String(b.name || '').trim();
+    const baseUrl = String(b.baseUrl || '').trim().replace(/\/+$/, '');
+
+    if (!slug || !name || !baseUrl) {
+      return res.status(400).json({ ok: false, reason: 'code, name and baseUrl are required' });
+    }
+    // A directory entry is a URL the app will navigate to — never let a spawn
+    // register a non-https target.
+    if (!/^https:\/\/[^\s/]+\.[^\s/]+/i.test(baseUrl)) {
+      return res.status(400).json({ ok: false, reason: 'baseUrl must be https' });
+    }
+
+    const vals = {
+      name,
+      member_name: String(b.memberName || '').trim() || null,
+      base_url: baseUrl,
+      member_url: String(b.memberUrl || '').trim().replace(/\/+$/, '') || null,
+      logo_url: String(b.logoUrl || '').trim() || null,
+      brand_color: String(b.brandColor || '').trim() || null,
+      build: String(b.build || '').trim() || null,
+    };
+
+    // Match on slug. Not ON CONFLICT: `slug` has no unique constraint and this
+    // table predates the directory, so existing rows can't be assumed clean.
+    // This runs once per spawn per 6h — the extra round trip costs nothing.
+    const existing = await pool.query(
+      `SELECT id FROM tenants WHERE LOWER(slug)=$1 ORDER BY id LIMIT 1`, [slug]
+    );
+
+    if (existing.rows.length) {
+      // NOTE: `listed` is intentionally absent — that's the operator's switch,
+      // and a spawn re-announcing itself must not silently un-hide it.
+      await pool.query(
+        `UPDATE tenants SET name=$1, member_name=$2, base_url=$3, member_url=$4,
+                            logo_url=$5, brand_color=$6, build=$7, last_seen_at=NOW()
+          WHERE id=$8`,
+        [vals.name, vals.member_name, vals.base_url, vals.member_url,
+         vals.logo_url, vals.brand_color, vals.build, existing.rows[0].id]
+      );
+    } else {
+      await pool.query(
+        `INSERT INTO tenants (app_id, name, slug, member_name, base_url, member_url,
+                              logo_url, brand_color, build, last_seen_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())`,
+        [(req.app && req.app.id) || null, vals.name, slug, vals.member_name, vals.base_url,
+         vals.member_url, vals.logo_url, vals.brand_color, vals.build]
+      );
+      console.log(`[directory] New spawn registered: ${slug} -> ${baseUrl}`);
+    }
+
+    res.json({ ok: true });
+  } catch(e) {
+    console.error('[hooks/registerTenant]', e);
+    res.status(500).json({ ok: false, reason: 'Server error' });
   }
 });
 
@@ -688,6 +777,49 @@ app.post('/api/apps', requireAdmin, async (req, res) => {
 });
 
 // ── Tenants Management ──────────────────────────────────────────────
+// ── Kronara app directory: the list the mobile app reads ───────────────────
+// Public and unauthenticated on purpose — the app reads it before anyone logs
+// in, and it contains nothing that isn't already public (a studio's name and
+// its public URL).
+//
+// Registered ahead of `app.get('*')`, which serves the dashboard SPA. That
+// catch-all is exactly why the client also checks the response content type:
+// before this route existed, a request here returned 200 text/html rather than
+// a 404, so "endpoint missing" was indistinguishable from "here is the data"
+// on status alone.
+app.get('/api/tenants/directory', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT slug, name, member_name, base_url, member_url, logo_url, brand_color
+         FROM tenants
+        WHERE COALESCE(listed, TRUE) = TRUE
+          AND slug IS NOT NULL AND slug <> ''
+          AND base_url IS NOT NULL AND base_url <> ''
+          -- Drop spawns that have stopped checking in, so dead studios fall off
+          -- on their own rather than lingering as broken entries in the app.
+          AND (last_seen_at IS NULL OR last_seen_at > NOW() - INTERVAL '30 days')
+        ORDER BY name ASC`
+    );
+
+    res.set('Cache-Control', 'public, max-age=300');
+    res.json({
+      updated: new Date().toISOString(),
+      tenants: result.rows.map(r => ({
+        code: r.slug,
+        name: r.name,
+        memberName: r.member_name || '',
+        baseUrl: r.base_url,
+        memberUrl: r.member_url || '',
+        logoUrl: r.logo_url || '',
+        brandColor: r.brand_color || '',
+      })),
+    });
+  } catch(e) {
+    console.error('[tenants/directory]', e);
+    res.status(500).json({ ok: false, reason: 'Server error' });
+  }
+});
+
 app.get('/api/tenants', requireAdmin, async (req, res) => {
   try {
     const result = await pool.query(
