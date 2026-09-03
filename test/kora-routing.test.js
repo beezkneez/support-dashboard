@@ -81,6 +81,21 @@ const ok = (c, label, detail) => {
      "the screenshot source is scheme-checked before it is rendered");
 }
 
+// -- The default view has to include what you have replied to ---------
+{
+  // Replying flips a ticket open -> in_progress. With the filter defaulting to
+  // "open", answering one made it disappear — survivable when this was a second
+  // copy of the tickets, not now that it is the only place they live.
+  const list = server.slice(server.indexOf("app.get('/api/tickets'"), server.indexOf("app.get('/api/tickets/:id'"));
+  ok(/status === 'active'/.test(list), "there is an 'active' status filter");
+  ok(/t\.status IN \('open','in_progress'\)/.test(list),
+     "which means open OR replied-to-and-waiting, not just untouched");
+
+  ok(/<option value="active" selected>/.test(html), "and it is what the page opens on");
+  ok(!/<option value="open" selected>/.test(html), "the old open-only default is gone");
+  ok(/tickets\?status=active/.test(html), "the home list uses it too");
+}
+
 // ── Push ────────────────────────────────────────────────────────────
 {
   // Support is answered only here now, so a missed notification is a support

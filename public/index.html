@@ -274,8 +274,9 @@
       <div class="filters">
         <input type="text" id="searchInput" placeholder="Search by name, email, subject..." oninput="debounceLoadTickets()">
         <select id="filterStatus" onchange="loadTickets()">
+          <option value="active" selected>Active (needs you)</option>
           <option value="all">All Status</option>
-          <option value="open" selected>Open</option>
+          <option value="open">Open</option>
           <option value="in_progress">In Progress</option>
           <option value="resolved">Resolved</option>
           <option value="closed">Closed</option>
@@ -595,8 +596,9 @@ async function loadDashboard() {
     `).join('')}
   `;
 
-  // Recent open tickets
-  const tr = await api('GET', '/api/tickets?status=open');
+  // Anything still live, not just untouched ones — a ticket you have replied
+  // to is still yours until it is resolved.
+  const tr = await api('GET', '/api/tickets?status=active');
   if (tr.ok) renderTicketList('recentTickets', tr.tickets.slice(0, 10));
 }
 

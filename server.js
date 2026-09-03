@@ -566,7 +566,14 @@ app.get('/api/tickets', requireAdmin, async (req, res) => {
     let params = [];
     let idx = 1;
 
-    if (status && status !== 'all') {
+    // 'active' means anything still needing you: open, or replied-to and
+    // waiting on them. Replying flips a ticket open -> in_progress, so a plain
+    // status=open view drops a ticket the instant you answer it — which was
+    // survivable when this was a second copy of the tickets and is not now that
+    // it is the only place they live.
+    if (status === 'active') {
+      where.push(`t.status IN ('open','in_progress')`);
+    } else if (status && status !== 'all') {
       where.push(`t.status=$${idx++}`);
       params.push(status);
     }
