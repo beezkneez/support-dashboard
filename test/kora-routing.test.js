@@ -58,12 +58,23 @@ const ok = (c, label, detail) => {
 
   // The dangerous failure is marking it forwarded when it never arrived: the
   // ticket then shows as somebody else's problem and is nobody's.
+  // Anchored on the structure, not the wording — the message has been reworded
+  // once already and the guarantee is about ordering, not prose.
   const markIdx = fwd.indexOf("SET forwarded_at = NOW()");
-  const guardIdx = fwd.indexOf("The spawn refused the forward");
+  const guardIdx = fwd.search(/if \(!r\.ok\) \{[\s\S]{0,200}return res\.json\(\{ ok: false/);
   ok(guardIdx > 0 && guardIdx < markIdx,
      "it is only marked forwarded after the spawn confirms it took it");
   ok(/no callback URL registered/.test(fwd),
      "and a spawn with no callback is refused rather than silently marked");
+
+  // A spawn mid-restart serves its host's HTML error page. Calling .json() on
+  // that surfaced as "Unexpected token '<'", which tells the reader nothing and
+  // looks identical to a genuine refusal.
+  ok(/content-type/.test(fwd) && /application\/json/.test(fwd),
+     "the reply is checked for JSON before it is parsed");
+  ok(/probably restarting/.test(fwd),
+     "and an HTML error page is reported as that, with the HTTP status");
+  ok(!/\.then\(x => x\.json\(\)\)/.test(fwd), "no blind .json() parse");
 }
 
 // ── The UI ──────────────────────────────────────────────────────────

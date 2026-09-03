@@ -914,18 +914,45 @@ app.post('/api/tickets/:id/forward', requireAdmin, async (req, res) => {
       });
     }
 
-    const r = await fetch(base.replace(/\/$/, '') + '/api/hooks/ticketForward', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-API-Key': t.app_api_key },
-      body: JSON.stringify({
-        externalId: t.external_id,
-        note,
-        forwardedBy: req.admin.name || req.admin.email || 'Support',
-      }),
-    }).then(x => x.json()).catch(err => ({ ok: false, reason: err.message }));
+    // Read the status and the content type before parsing.
+    //
+    // Blindly calling .json() means any non-JSON response surfaces as
+    // "Unexpected token '<'", which tells the reader nothing and hides the
+    // actual cause — a spawn mid-restart serving its host's HTML error page
+    // looks identical to a genuine refusal. The status is the useful part.
+    let r, httpStatus = 0, raw = '';
+    try {
+      const resp = await fetch(base.replace(/\/$/, '') + '/api/hooks/ticketForward', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': t.app_api_key },
+        body: JSON.stringify({
+          externalId: t.external_id,
+          note,
+          forwardedBy: req.admin.name || req.admin.email || 'Support',
+        }),
+      });
+      httpStatus = resp.status;
+      raw = await resp.text();
+      if ((resp.headers.get('content-type') || '').includes('application/json')) {
+        try { r = JSON.parse(raw); } catch (_) { r = null; }
+      }
+    } catch (err) {
+      return res.json({ ok: false, reason: 'Could not reach that studio (' + err.message + '). It may be restarting — try again in a moment.' });
+    }
 
-    if (!r || !r.ok) {
-      return res.json({ ok: false, reason: 'The spawn refused the forward: ' + ((r && r.reason) || 'no response') });
+    if (!r) {
+      // HTML back from a JSON endpoint almost always means the app is
+      // restarting or the route is not deployed there yet.
+      const looksLikeAnErrorPage = /^\s*<(!doctype|html)/i.test(raw);
+      return res.json({
+        ok: false,
+        reason: looksLikeAnErrorPage
+          ? 'That studio returned a web page instead of an answer (HTTP ' + httpStatus + '). It is probably restarting — try again in a minute.'
+          : 'That studio gave an unreadable reply (HTTP ' + httpStatus + ').'
+      });
+    }
+    if (!r.ok) {
+      return res.json({ ok: false, reason: 'That studio refused the forward: ' + (r.reason || 'no reason given') });
     }
 
     await pool.query(
