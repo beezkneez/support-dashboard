@@ -108,6 +108,8 @@
   /* ── Stats ──────────────────────── */
   .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 24px; }
   .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+  .stat-clickable { cursor: pointer; transition: .15s; }
+  .stat-clickable:hover { border-color: var(--accent); transform: translateY(-1px); box-shadow: var(--shadow); }
   .stat-card .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 4px; }
   .stat-card .value { font-size: 28px; font-weight: 700; }
   .stat-card .value.text-warn { color: var(--warn); }
@@ -274,10 +276,10 @@
       <div class="filters">
         <input type="text" id="searchInput" placeholder="Search by name, email, subject..." oninput="debounceLoadTickets()">
         <select id="filterStatus" onchange="loadTickets()">
-          <option value="active" selected>Active (needs you)</option>
+          <option value="active" selected>Active</option>
           <option value="all">All Status</option>
-          <option value="open">Open</option>
-          <option value="in_progress">In Progress</option>
+          <option value="open">Needs you</option>
+          <option value="in_progress">Waiting on them</option>
           <option value="resolved">Resolved</option>
           <option value="closed">Closed</option>
         </select>
@@ -571,20 +573,24 @@ async function loadDashboard() {
   if (openCount > 0) { badge.textContent = openCount; badge.classList.remove('hidden'); }
   else { badge.classList.add('hidden'); }
 
+  // The tiles are the fastest route to a filtered list, so they are buttons.
+  // The labels say whose turn it is, because "Open" and "In Progress" do not:
+  // a ticket goes back to 'open' when the user replies, so open really means
+  // "waiting on you" and in_progress means "waiting on them".
   document.getElementById('statsGrid').innerHTML = `
-    <div class="stat-card">
-      <div class="label">Open</div>
+    <div class="stat-card stat-clickable" onclick="showTicketsFiltered('open')" title="New, or they have replied and are waiting on you">
+      <div class="label">Needs you</div>
       <div class="value text-warn">${s.open_count}</div>
     </div>
-    <div class="stat-card">
-      <div class="label">In Progress</div>
+    <div class="stat-card stat-clickable" onclick="showTicketsFiltered('in_progress')" title="You have replied and are waiting on them">
+      <div class="label">Waiting on them</div>
       <div class="value text-info">${s.in_progress_count}</div>
     </div>
-    <div class="stat-card">
+    <div class="stat-card stat-clickable" onclick="showTicketsFiltered('resolved')">
       <div class="label">Resolved</div>
       <div class="value text-success">${s.resolved_count}</div>
     </div>
-    <div class="stat-card">
+    <div class="stat-card stat-clickable" onclick="showTicketsFiltered('all')">
       <div class="label">Today</div>
       <div class="value">${s.today_count}</div>
     </div>
@@ -600,6 +606,19 @@ async function loadDashboard() {
   // to is still yours until it is resolved.
   const tr = await api('GET', '/api/tickets?status=active');
   if (tr.ok) renderTicketList('recentTickets', tr.tickets.slice(0, 10));
+}
+
+// Jump from a stat tile straight to that slice of the list. Reading a number
+// and then having to go and reproduce the filter by hand is the kind of small
+// friction that makes a dashboard feel like paperwork.
+function showTicketsFiltered(status) {
+  showPage('tickets');
+  const sel = document.getElementById('filterStatus');
+  if (sel) sel.value = status;
+  const app = document.getElementById('filterApp'); if (app) app.value = 'all';
+  const type = document.getElementById('filterType'); if (type) type.value = 'all';
+  const q = document.getElementById('searchInput'); if (q) q.value = '';
+  loadTickets();
 }
 
 // ── Tickets ────────────────────────────────────────────────────────

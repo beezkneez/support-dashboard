@@ -600,9 +600,11 @@ app.get('/api/tickets', requireAdmin, async (req, res) => {
        FROM tickets t
        LEFT JOIN apps a ON a.id = t.app_id
        ${whereClause}
-       ORDER BY
-         CASE t.status WHEN 'open' THEN 0 WHEN 'in_progress' THEN 1 ELSE 2 END,
-         t.updated_at DESC
+       -- Most recent activity first, full stop. Grouping every 'open' ticket
+       -- above every 'in_progress' one meant the ticket you just replied to
+       -- sank below older untouched ones -- you answer something and it moves
+       -- away from you. Whose turn it is shows on the row instead.
+       ORDER BY t.updated_at DESC
        LIMIT 200`,
       params
     );

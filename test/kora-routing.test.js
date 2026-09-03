@@ -81,6 +81,24 @@ const ok = (c, label, detail) => {
      "the screenshot source is scheme-checked before it is rendered");
 }
 
+// -- The list reads like an inbox -----------------------------------
+{
+  // It used to group every 'open' ticket above every 'in_progress' one, so the
+  // ticket you had just replied to sank below older untouched ones: you answer
+  // something and it moves away from you.
+  const list = server.slice(server.indexOf("app.get('/api/tickets'"), server.indexOf("app.get('/api/tickets/:id'"));
+  ok(/ORDER BY t\.updated_at DESC/.test(list), "most recent activity first");
+  ok(!/CASE t\.status WHEN 'open' THEN 0/.test(list), "no longer grouped by status ahead of recency");
+
+  // "Open" and "In Progress" do not say whose turn it is, and a ticket goes
+  // back to 'open' when the user replies — so open really means "waiting on
+  // you".
+  ok(/>Needs you</.test(html) && />Waiting on them</.test(html),
+     "the tiles say whose turn it is rather than a status name");
+  ok(/function showTicketsFiltered\(/.test(html), "and clicking one opens that slice of the list");
+  ok(/stat-clickable/.test(html), "with a visible affordance that they are clickable");
+}
+
 // -- The default view has to include what you have replied to ---------
 {
   // Replying flips a ticket open -> in_progress. With the filter defaulting to
