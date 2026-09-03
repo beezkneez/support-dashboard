@@ -174,6 +174,16 @@ async function initDB() {
     await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS spawn TEXT`).catch(()=>{});
     await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS spawn_name TEXT`).catch(()=>{});
     await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS callback_url TEXT`).catch(()=>{});
+    // Kora. Every spawn now routes ALL support here rather than to its own
+    // studio admin, so this has to carry enough for the whole triage: the chat
+    // that produced the ticket, the screenshot, and where the person was.
+    await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS ai_session_id TEXT`).catch(()=>{});
+    await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS image_url TEXT`).catch(()=>{});
+    await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS page_context JSONB DEFAULT '{}'::jsonb`).catch(()=>{});
+    // Set when it has been handed down to the studio's own admin, which is the
+    // only way a ticket becomes visible on a spawn at all now.
+    await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS forwarded_at TIMESTAMPTZ`).catch(()=>{});
+    await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS forwarded_by TEXT`).catch(()=>{});
     await client.query(`ALTER TABLE apps ADD COLUMN IF NOT EXISTS callback_url TEXT`).catch(()=>{});
     // Auto-configure the Aradia Time reply-back URL (only if not already set).
     await client.query(
@@ -278,15 +288,18 @@ app.get('/api/auth/me', requireAdmin, (req, res) => {
 // ── App Webhook Routes (called by aradia-time / kronara-build) ──────
 app.post('/api/hooks/ticket', requireApiKey, async (req, res) => {
   try {
-    const { externalId, tenantId, fromEmail, fromName, type, subject, body, spawn, spawnName, callbackUrl } = req.body;
+    const { externalId, tenantId, fromEmail, fromName, type, subject, body, spawn, spawnName, callbackUrl,
+            aiSessionId, imageUrl, pageContext } = req.body;
     if (!fromEmail || !body) return res.json({ ok: false, reason: 'fromEmail and body required' });
 
     const ticketId = uuidv4();
     await pool.query(
-      `INSERT INTO tickets (id, app_id, external_id, tenant_id, from_email, from_name, type, subject, spawn, spawn_name, callback_url)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      `INSERT INTO tickets (id, app_id, external_id, tenant_id, from_email, from_name, type, subject, spawn, spawn_name, callback_url,
+                            ai_session_id, image_url, page_context)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
       [ticketId, req.app.id, externalId || null, tenantId || null,
-       fromEmail, fromName || null, type || 'message', subject || '(no subject)', spawn || null, spawnName || null, callbackUrl || null]
+       fromEmail, fromName || null, type || 'message', subject || '(no subject)', spawn || null, spawnName || null, callbackUrl || null,
+       aiSessionId || null, imageUrl || null, JSON.stringify(pageContext || {})]
     );
 
     await pool.query(
@@ -670,6 +683,79 @@ app.post('/api/tickets/:id/reply', requireAdmin, async (req, res) => {
 });
 
 // Add internal note
+// Hand a ticket down to the studio's own admin.
+//
+// Every spawn now sends ALL support here rather than to its own admin panel,
+// because most of it is about how the software works and only one person can
+// answer that. But some of it isn't: "why was my timesheet flagged", "can you
+// approve my late shift" are questions for that studio, and nobody here can
+// answer them.
+//
+// So this is the release valve. Forwarding makes the ticket visible in that
+// spawn's own support screen — which is otherwise empty by design — and the
+// studio admin replies there. Their reply reaches the staff member through the
+// same path a reply from here would.
+app.post('/api/tickets/:id/forward', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const note = String(req.body.note || '').trim();
+
+    const q = await pool.query(
+      `SELECT t.*, a.api_key AS app_api_key, a.callback_url AS app_callback_url
+         FROM tickets t LEFT JOIN apps a ON a.id = t.app_id
+        WHERE t.id = $1`, [id]
+    );
+    if (!q.rows.length) return res.json({ ok: false, reason: 'Not found' });
+    const t = q.rows[0];
+
+    if (t.forwarded_at) {
+      return res.json({ ok: true, alreadyForwarded: true, forwardedAt: t.forwarded_at });
+    }
+
+    const base = t.callback_url || t.app_callback_url;
+    if (!base || !t.external_id || !t.app_api_key) {
+      // Without a callback there is nowhere to forward TO. Say so rather than
+      // marking it forwarded and letting it disappear into a gap.
+      return res.json({
+        ok: false,
+        reason: 'That spawn has no callback URL registered, so it cannot receive a forward. Reply here instead.'
+      });
+    }
+
+    const r = await fetch(base.replace(/\/$/, '') + '/api/hooks/ticketForward', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': t.app_api_key },
+      body: JSON.stringify({
+        externalId: t.external_id,
+        note,
+        forwardedBy: req.admin.name || req.admin.email || 'Support',
+      }),
+    }).then(x => x.json()).catch(err => ({ ok: false, reason: err.message }));
+
+    if (!r || !r.ok) {
+      return res.json({ ok: false, reason: 'The spawn refused the forward: ' + ((r && r.reason) || 'no response') });
+    }
+
+    await pool.query(
+      `UPDATE tickets SET forwarded_at = NOW(), forwarded_by = $2, updated_at = NOW() WHERE id = $1`,
+      [id, req.admin.name || req.admin.email || 'Support']
+    );
+    // Recorded as a note so the trail reads in order alongside the replies,
+    // rather than being a flag you have to go looking for.
+    await pool.query(
+      `INSERT INTO ticket_messages (ticket_id, sender_type, sender_name, sender_email, body, source)
+       VALUES ($1,'note',$2,$3,$4,'dashboard')`,
+      [id, req.admin.name || 'Support', req.admin.email || '',
+       'Forwarded to the studio admin' + (note ? ': ' + note : '.')]
+    );
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[ticket forward]', e.message);
+    res.json({ ok: false, reason: e.message });
+  }
+});
+
 app.post('/api/tickets/:id/note', requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;

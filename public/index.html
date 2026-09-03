@@ -145,6 +145,18 @@
   .msg-bubble .msg-body { white-space: pre-wrap; font-size: 14px; line-height: 1.6; }
   .msg-bubble .msg-source { font-size: 11px; color: var(--muted); margin-top: 8px; }
 
+  /* Kora context. A ticket is triaged here and nowhere else now, so the page,
+     device and the errors their browser logged have to be readable at a glance
+     rather than buried in the body text. */
+  .kora-ctx { background: var(--note-bg); border: 1px solid var(--note-border); border-radius: var(--radius); padding: 12px 16px; margin: 0 0 16px; }
+  .kora-ctx-title { font-size: 12px; font-weight: 800; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 8px; }
+  .kora-ctx-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 6px 18px; font-size: 13px; }
+  .kora-ctx-grid span { color: var(--muted); margin-right: 6px; }
+  .kora-ctx-errs { margin-top: 10px; font-size: 12px; }
+  .kora-ctx-errs span { color: var(--muted); display: block; margin-bottom: 3px; }
+  .kora-ctx-errs code { display: block; white-space: pre-wrap; word-break: break-word; background: rgba(0,0,0,.05); padding: 7px 9px; border-radius: 6px; font-size: 11.5px; }
+  .kora-ctx-shot { display: block; margin-top: 10px; max-width: 260px; border-radius: 8px; border: 1px solid var(--note-border); }
+  .fwd-badge { font-size: 12px; font-weight: 700; color: #4338ca; background: #eef2ff; border-radius: 6px; padding: 4px 10px; }
   .note-bubble { background: var(--note-bg); border: 1px solid var(--note-border); padding: 12px 16px; border-radius: var(--radius); margin-bottom: 8px; font-size: 13px; }
   .note-bubble .note-header { font-size: 12px; color: var(--note-text); margin-bottom: 4px; }
 
@@ -618,6 +630,47 @@ function renderTicketList(containerId, tickets) {
 }
 
 // ── Ticket Detail ──────────────────────────────────────────────────
+// Everything the spawn attached, laid out so triage does not need a reply just
+// to ask "which page were you on". A ticket that came from Kora arrives with
+// the whole chat in its body plus this.
+function koraContextPanel(t) {
+  const c = t.page_context || {};
+  const bits = [];
+  if (c.tab)          bits.push(['Page', c.tab]);
+  if (c.buildVersion) bits.push(['Build', String(c.buildVersion).slice(0, 12)]);
+  if (c.viewport)     bits.push(['Screen', c.viewport + (c.dpr ? ' @' + c.dpr + 'x' : '')]);
+  if (c.theme)        bits.push(['Theme', c.theme]);
+  if (c.ua)           bits.push(['Device', String(c.ua).slice(0, 90)]);
+  if (c.online === false) bits.push(['Network', 'offline at the time']);
+
+  const errs = Array.isArray(c.recentErrors) ? c.recentErrors : [];
+  // Only ever render an http(s) image. A spawn without Bunny storage falls back
+  // to keeping the raw data URL, and that is fine in an <img> but must not be
+  // treated as a link.
+  const shot = t.image_url && /^https?:\/\//i.test(t.image_url) ? t.image_url
+             : (t.image_url && /^data:image\//i.test(t.image_url) ? t.image_url : '');
+
+  if (!bits.length && !errs.length && !shot) return '';
+
+  return `
+    <div class="kora-ctx">
+      <div class="kora-ctx-title">Where this came from</div>
+      ${bits.length ? `<div class="kora-ctx-grid">${bits.map(([k, v]) =>
+        `<div><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join('')}</div>` : ''}
+      ${errs.length ? `<div class="kora-ctx-errs"><span>Errors on their device just before this</span>
+        <code>${esc(errs.join(String.fromCharCode(10)))}</code></div>` : ''}
+      ${shot ? `<a href="${shot}" target="_blank" rel="noopener"><img class="kora-ctx-shot" src="${shot}" alt="screenshot they attached"></a>` : ''}
+    </div>`;
+}
+
+async function forwardTicket(id) {
+  const note = prompt("Pass this to the studio's own admin? Optional note for them (why it is theirs):");
+  if (note === null) return;
+  const r = await api('POST', '/api/tickets/' + id + '/forward', { note });
+  if (!r.ok) { alert(r.reason || 'Could not forward that.'); return; }
+  openTicket(id);
+}
+
 async function openTicket(id) {
   showPage('ticketDetail');
   const el = document.getElementById('ticketDetail');
@@ -657,9 +710,14 @@ async function openTicket(id) {
             `<option value="${p}" ${p===t.priority?'selected':''}>${p}</option>`
           ).join('')}
         </select>
+        ${t.forwarded_at
+          ? `<span class="fwd-badge" title="Passed to the studio's own admin">→ with the studio</span>`
+          : `<button class="btn btn-ghost btn-sm" onclick="forwardTicket('${t.id}')" title="Only that studio can answer this">→ Pass to studio admin</button>`}
         <button class="btn btn-danger btn-sm" onclick="deleteTicket('${t.id}')">Delete</button>
       </div>
     </div>
+
+    ${koraContextPanel(t)}
 
     <div class="message-thread">
       ${msgs.map(m => `
