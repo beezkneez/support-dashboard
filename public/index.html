@@ -402,6 +402,25 @@
 
     <div id="pageSettings" class="hidden">
       <h1 class="page-title">Settings</h1>
+
+      <!-- Support is answered only here now, so being told promptly is part of
+           the system working rather than a nicety. -->
+      <div class="card" style="margin-bottom:16px;">
+        <h3 style="margin-bottom:6px;">Notifications</h3>
+        <p style="font-size:13px;color:var(--muted);margin-bottom:16px;">
+          Every studio's support now comes here and nowhere else, so it is worth
+          being told. Push is per device — enrol each phone or laptop you want
+          buzzed, and removing one leaves the others alone.
+        </p>
+        <div id="notifPrefs"></div>
+        <div id="pushDevices" style="margin-top:16px;"></div>
+        <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;">
+          <button class="btn btn-primary btn-sm" id="pushEnableBtn" onclick="enablePush()">Turn on notifications for this device</button>
+          <button class="btn btn-ghost btn-sm" onclick="testPush()">Send a test</button>
+        </div>
+        <div id="pushMsg" style="font-size:12.5px;color:var(--muted);margin-top:10px;"></div>
+      </div>
+
       <div class="card">
         <h3 style="margin-bottom:16px;">Connected Apps</h3>
         <p style="font-size:13px;color:var(--muted);margin-bottom:16px;">
@@ -1023,6 +1042,120 @@ checkAuth();
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(() => {});
 }
+
+// ── Push, client side ────────────────────────────────────────────────
+//
+// Per device, deliberately. One subscription belongs to one browser on one
+// machine, so enrolling a phone must not un-enrol the laptop, and losing a
+// phone should be fixable from whatever you still have in your hand.
+
+function b64ToU8(base64) {
+  const pad = '='.repeat((4 - (base64.length % 4)) % 4);
+  const raw = atob((base64 + pad).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
+}
+
+// A label you will recognise later, when the list is three rows long and you
+// need to know which one is the phone you dropped in a river.
+function deviceLabel() {
+  const ua = navigator.userAgent;
+  const os = /iPhone|iPad/.test(ua) ? 'iPhone/iPad'
+           : /Android/.test(ua) ? 'Android'
+           : /Mac OS X/.test(ua) ? 'Mac'
+           : /Windows/.test(ua) ? 'Windows' : 'Device';
+  const br = /Edg\//.test(ua) ? 'Edge'
+           : /Chrome\//.test(ua) ? 'Chrome'
+           : /Safari\//.test(ua) ? 'Safari'
+           : /Firefox\//.test(ua) ? 'Firefox' : 'Browser';
+  return os + ' · ' + br;
+}
+
+async function loadPushSettings() {
+  const r = await api('GET', '/api/push/devices');
+  const prefsEl = document.getElementById('notifPrefs');
+  const devEl = document.getElementById('pushDevices');
+  if (!r.ok) { devEl.innerHTML = '<p style="font-size:13px;color:var(--muted);">Could not load notification settings.</p>'; return; }
+
+  const p = r.prefs || {};
+  const row = (key, label, hint) => `
+    <label style="display:flex;align-items:flex-start;gap:10px;margin-bottom:10px;font-size:13.5px;cursor:pointer;">
+      <input type="checkbox" ${p[key] !== false ? 'checked' : ''} onchange="savePushPref('${key}', this.checked)" style="margin-top:2px;">
+      <span><b>${label}</b><br><span style="color:var(--muted);font-size:12.5px;">${hint}</span></span>
+    </label>`;
+
+  prefsEl.innerHTML =
+    row('push_new_ticket', 'Push me when a ticket arrives', 'Any studio, any spawn — this is the one that matters.') +
+    row('push_user_reply', 'Push me when someone replies', 'A reply on a ticket you are already in.') +
+    row('email_new_ticket', 'Email me as well', 'Independent of push. Off means push only.') +
+    (r.enabled ? '' : '<p style="font-size:12.5px;color:var(--danger,#b91c1c);margin-top:8px;">Push is not configured on the server (VAPID keys unset) — email only until it is.</p>');
+
+  devEl.innerHTML = (r.devices || []).length
+    ? '<h4 style="font-size:13px;color:var(--muted);margin-bottom:8px;">Enrolled devices</h4>' +
+      r.devices.map(d => `
+        <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);font-size:13px;">
+          <span style="flex:1;">${esc(d.label || 'Device')}
+            <span style="color:var(--muted);font-size:11.5px;"> · added ${new Date(d.created_at).toLocaleDateString()}${d.last_ok ? ' · last used ' + new Date(d.last_ok).toLocaleDateString() : ''}</span>
+          </span>
+          <button class="btn btn-ghost btn-sm" onclick="removePushDevice(${d.id})">Remove</button>
+        </div>`).join('')
+    : '<p style="font-size:13px;color:var(--muted);">No devices enrolled yet.</p>';
+}
+
+async function savePushPref(key, val) {
+  await api('POST', '/api/push/prefs', { [key]: val });
+}
+
+async function removePushDevice(id) {
+  await api('POST', '/api/push/unsubscribe', { id });
+  loadPushSettings();
+}
+
+async function enablePush() {
+  const msg = document.getElementById('pushMsg');
+  const set = (t) => { msg.textContent = t; };
+  try {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+      return set('This browser does not support push notifications.');
+    }
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') {
+      // Denied is sticky — the page cannot ask again, so say where to undo it
+      // rather than letting them tap a button that will never work.
+      return set(perm === 'denied'
+        ? 'Notifications are blocked for this site. Allow them in your browser’s site settings, then try again.'
+        : 'Notifications were not allowed.');
+    }
+
+    const k = await api('GET', '/api/push/key');
+    if (!k.ok || !k.enabled || !k.key) return set('Push is not configured on the server yet.');
+
+    const reg = await navigator.serviceWorker.register('/sw.js');
+    await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: b64ToU8(k.key),
+    });
+
+    const j = sub.toJSON();
+    const r = await api('POST', '/api/push/subscribe', {
+      endpoint: j.endpoint, keys: j.keys, label: deviceLabel(),
+    });
+    if (!r.ok) return set(r.reason || 'Could not save this device.');
+    set('This device is enrolled.');
+    loadPushSettings();
+  } catch (e) {
+    set('Could not turn on notifications: ' + e.message);
+  }
+}
+
+async function testPush() {
+  const msg = document.getElementById('pushMsg');
+  const r = await api('POST', '/api/push/test', {});
+  msg.textContent = r.ok
+    ? 'Sent to ' + r.devices + ' device(s) — it should appear shortly.'
+    : (r.reason || 'Could not send a test.');
+}
+
 </script>
 </body>
 </html>

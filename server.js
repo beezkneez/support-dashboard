@@ -184,6 +184,26 @@ async function initDB() {
     // only way a ticket becomes visible on a spawn at all now.
     await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS forwarded_at TIMESTAMPTZ`).catch(()=>{});
     await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS forwarded_by TEXT`).catch(()=>{});
+    // Push, per device. Support is answered only here now, so “I did not see
+    // it” is a real failure. endpoint is UNIQUE so re-subscribing the same
+    // browser updates its row instead of doubling every notification.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS push_subscriptions (
+        id         SERIAL PRIMARY KEY,
+        admin_id   INTEGER REFERENCES admin_users(id) ON DELETE CASCADE,
+        endpoint   TEXT NOT NULL UNIQUE,
+        p256dh     TEXT NOT NULL,
+        auth       TEXT NOT NULL,
+        label      TEXT DEFAULT '',
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        last_ok    TIMESTAMPTZ
+      )
+    `).catch(()=>{});
+    // Email and push are independent switches, defaulting on — an admin who
+    // has never touched the settings should still be told about a ticket.
+    await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS push_new_ticket BOOLEAN DEFAULT TRUE`).catch(()=>{});
+    await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS push_user_reply BOOLEAN DEFAULT TRUE`).catch(()=>{});
+    await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS email_new_ticket BOOLEAN DEFAULT TRUE`).catch(()=>{});
     await client.query(`ALTER TABLE apps ADD COLUMN IF NOT EXISTS callback_url TEXT`).catch(()=>{});
     // Auto-configure the Aradia Time reply-back URL (only if not already set).
     await client.query(
@@ -308,6 +328,15 @@ app.post('/api/hooks/ticket', requireApiKey, async (req, res) => {
       [ticketId, fromName || fromEmail, fromEmail, body]
     );
 
+    // Push first: it is the one that arrives while you are away from an inbox,
+    // and it is what makes answering support only here safe — nothing gets
+    // missed because nobody happened to be looking at their email.
+    pushToAdmins(
+      (type === 'bug' ? '🐛 Bug' : '💬 Support') + ' · ' + (spawnName || spawn || req.app.name),
+      (fromName || fromEmail) + ': ' + (subject || body),
+      '/', 'ticket'
+    );
+
     // Notify admin via email
     const dashUrl = process.env.DASHBOARD_URL || 'http://localhost:4500';
     sendMail({
@@ -359,6 +388,11 @@ app.post('/api/hooks/ticket/:id/reply', requireApiKey, async (req, res) => {
     await pool.query(`UPDATE tickets SET updated_at=NOW(), status='open' WHERE id=$1`, [id]);
 
     // Notify admin
+    pushToAdmins(
+      '↩ Reply · ' + req.app.name,
+      (fromName || fromEmail) + ': ' + body,
+      '/', 'reply'
+    );
     sendMail({
       to: process.env.ADMIN_EMAIL,
       subject: `[${req.app.name}] Reply on: ${ticket.rows[0].subject || '(no subject)'}`,
@@ -695,6 +729,155 @@ app.post('/api/tickets/:id/reply', requireAdmin, async (req, res) => {
 // spawn's own support screen — which is otherwise empty by design — and the
 // studio admin replies there. Their reply reaches the staff member through the
 // same path a reply from here would.
+
+// ── Push notifications for the dashboard ─────────────────────────────
+//
+// Support is answered here and nowhere else now, so "I didn't see it" is a
+// real failure mode rather than an inconvenience. Email alone loses to a busy
+// inbox; this is the same per-device Web Push setup the tenant apps use.
+//
+// Per device on purpose: one row per browser/phone, so enrolling a phone does
+// not un-enrol a laptop, and losing a device does not take the others with it.
+// Dead subscriptions are pruned when the push service rejects them — a
+// subscription outlives the browser profile that made it, and without pruning
+// the table fills with endpoints that will never deliver again.
+const webpush = require('web-push');
+
+const PUSH_READY = !!(process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY);
+if (PUSH_READY) {
+  webpush.setVapidDetails(
+    'mailto:' + (process.env.ADMIN_EMAIL || 'support@example.com'),
+    process.env.VAPID_PUBLIC_KEY,
+    process.env.VAPID_PRIVATE_KEY
+  );
+} else {
+  console.warn('[push] VAPID keys unset — push is off, email only.');
+}
+
+// Send to every device this admin has enrolled.
+async function pushToAdmins(title, body, url, category) {
+  if (!PUSH_READY) return;
+  try {
+    // Preference is per admin, per category. An admin with push off for a
+    // category simply has no rows returned for it.
+    const col = { ticket: 'push_new_ticket', reply: 'push_user_reply' }[category] || null;
+    const q = col
+      ? `SELECT s.* FROM push_subscriptions s
+           JOIN admin_users a ON a.id = s.admin_id
+          WHERE COALESCE(a.${col}, TRUE) = TRUE`
+      : `SELECT s.* FROM push_subscriptions s`;
+    const subs = (await pool.query(q)).rows;
+
+    await Promise.all(subs.map(async (s) => {
+      try {
+        await webpush.sendNotification(
+          { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } },
+          JSON.stringify({ title, body: String(body || '').slice(0, 180), url: url || '/' })
+        );
+        await pool.query(`UPDATE push_subscriptions SET last_ok = NOW() WHERE id = $1`, [s.id]).catch(() => {});
+      } catch (err) {
+        const code = err && err.statusCode;
+        // 404/410 mean the subscription is gone for good; 403 means the VAPID
+        // key no longer matches it. Keeping any of them just guarantees a
+        // failure on every future send.
+        if (code === 404 || code === 410 || code === 403) {
+          await pool.query(`DELETE FROM push_subscriptions WHERE id = $1`, [s.id]).catch(() => {});
+          console.log('[push] pruned a dead subscription (' + code + ')');
+        } else {
+          console.error('[push] send failed:', code || (err && err.message));
+        }
+      }
+    }));
+  } catch (e) {
+    console.error('[push]', e.message);
+  }
+}
+
+// The key the browser needs to subscribe. Public by definition.
+app.get('/api/push/key', requireAdmin, (req, res) => {
+  res.json({ ok: true, enabled: PUSH_READY, key: process.env.VAPID_PUBLIC_KEY || '' });
+});
+
+app.post('/api/push/subscribe', requireAdmin, async (req, res) => {
+  try {
+    const { endpoint, keys, label } = req.body || {};
+    if (!endpoint || !keys || !keys.p256dh || !keys.auth) {
+      return res.json({ ok: false, reason: 'Incomplete subscription.' });
+    }
+    // Endpoint is unique, so re-subscribing the same browser updates its row
+    // rather than adding a duplicate that would double every notification.
+    await pool.query(
+      `INSERT INTO push_subscriptions (admin_id, endpoint, p256dh, auth, label)
+       VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (endpoint) DO UPDATE
+         SET admin_id = EXCLUDED.admin_id, p256dh = EXCLUDED.p256dh,
+             auth = EXCLUDED.auth, label = EXCLUDED.label, last_ok = NOW()`,
+      [req.admin.id, endpoint, keys.p256dh, keys.auth, String(label || '').slice(0, 80)]
+    );
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[push subscribe]', e.message);
+    res.json({ ok: false, reason: e.message });
+  }
+});
+
+app.post('/api/push/unsubscribe', requireAdmin, async (req, res) => {
+  try {
+    const { endpoint, id } = req.body || {};
+    if (id) await pool.query(`DELETE FROM push_subscriptions WHERE id=$1 AND admin_id=$2`, [id, req.admin.id]);
+    else if (endpoint) await pool.query(`DELETE FROM push_subscriptions WHERE endpoint=$1`, [endpoint]);
+    else return res.json({ ok: false, reason: 'Nothing named to remove.' });
+    res.json({ ok: true });
+  } catch (e) {
+    res.json({ ok: false, reason: e.message });
+  }
+});
+
+// The devices you are enrolled on, so a lost phone can be removed from the
+// one you still have.
+app.get('/api/push/devices', requireAdmin, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT id, label, created_at, last_ok FROM push_subscriptions WHERE admin_id=$1 ORDER BY created_at DESC`,
+      [req.admin.id]);
+    const a = await pool.query(
+      `SELECT COALESCE(push_new_ticket,TRUE) AS push_new_ticket,
+              COALESCE(push_user_reply,TRUE) AS push_user_reply,
+              COALESCE(email_new_ticket,TRUE) AS email_new_ticket
+         FROM admin_users WHERE id=$1`, [req.admin.id]);
+    res.json({ ok: true, enabled: PUSH_READY, devices: r.rows, prefs: a.rows[0] || {} });
+  } catch (e) {
+    res.json({ ok: false, reason: e.message });
+  }
+});
+
+// Email and push are independent switches — you might want a phone buzz for a
+// new ticket but not an email, or both, or neither while you are away.
+app.post('/api/push/prefs', requireAdmin, async (req, res) => {
+  try {
+    const allowed = ['push_new_ticket', 'push_user_reply', 'email_new_ticket'];
+    const sets = [], vals = [];
+    for (const k of allowed) {
+      if (typeof req.body[k] === 'boolean') { sets.push(`${k}=$${sets.length + 1}`); vals.push(req.body[k]); }
+    }
+    if (!sets.length) return res.json({ ok: true });
+    vals.push(req.admin.id);
+    await pool.query(`UPDATE admin_users SET ${sets.join(',')} WHERE id=$${vals.length}`, vals);
+    res.json({ ok: true });
+  } catch (e) {
+    res.json({ ok: false, reason: e.message });
+  }
+});
+
+// Prove it works on this device before trusting it with a real ticket.
+app.post('/api/push/test', requireAdmin, async (req, res) => {
+  if (!PUSH_READY) return res.json({ ok: false, reason: 'Push is not configured on the server.' });
+  const n = (await pool.query(`SELECT COUNT(*)::int c FROM push_subscriptions WHERE admin_id=$1`, [req.admin.id])).rows[0].c;
+  if (!n) return res.json({ ok: false, reason: 'No devices enrolled yet — turn on notifications first.' });
+  await pushToAdmins('Support Dashboard', 'Test notification — push is working.', '/', null);
+  res.json({ ok: true, devices: n });
+});
+
 app.post('/api/tickets/:id/forward', requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;

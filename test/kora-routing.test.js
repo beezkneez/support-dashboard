@@ -10,6 +10,7 @@ const path = require("path");
 const ROOT = path.join(__dirname, "..");
 const server = fs.readFileSync(path.join(ROOT, "server.js"), "utf8");
 const html = fs.readFileSync(path.join(ROOT, "public", "index.html"), "utf8");
+const sw   = fs.readFileSync(path.join(ROOT, "public", "sw.js"), "utf8");
 
 let fails = 0;
 const ok = (c, label, detail) => {
@@ -78,6 +79,41 @@ const ok = (c, label, detail) => {
   const panel = html.slice(html.indexOf("function koraContextPanel("), html.indexOf("async function forwardTicket("));
   ok(/\^https\?:/.test(panel) || /https\?:\\\/\\\//.test(panel),
      "the screenshot source is scheme-checked before it is rendered");
+}
+
+// ── Push ────────────────────────────────────────────────────────────
+{
+  // Support is answered only here now, so a missed notification is a support
+  // request nobody has seen. Email alone loses to a busy inbox.
+  ok(/require\('web-push'\)/.test(server), "web-push is wired in");
+  ok(/CREATE TABLE IF NOT EXISTS push_subscriptions/.test(server), "subscriptions are stored per device");
+  ok(/endpoint   TEXT NOT NULL UNIQUE/.test(server),
+     "endpoint is unique, so re-subscribing a browser updates rather than doubles it");
+  ok(/ON CONFLICT \(endpoint\) DO UPDATE/.test(server), "and the insert relies on that");
+
+  const push = server.slice(server.indexOf("async function pushToAdmins("), server.indexOf("app.get('/api/push/key'"));
+  // A subscription outlives the browser profile that made it. Without pruning,
+  // the table fills with endpoints that can never deliver again.
+  ok(/404 \|\| code === 410 \|\| code === 403/.test(push), "dead subscriptions are pruned on 404/410/403");
+  ok(/DELETE FROM push_subscriptions WHERE id/.test(push), "actually deleted, not just logged");
+
+  // Every notified event needs a preference column, or it is unmutable.
+  ok(/push_new_ticket/.test(server) && /push_user_reply/.test(server), "each push category has a preference");
+  ok(/email_new_ticket/.test(server), "and email is a separate switch from push");
+  ok(/pushToAdmins\(/.test(server.slice(server.indexOf("app.post('/api/hooks/ticket'"),
+                                        server.indexOf("app.post('/api/hooks/ticket/:id/reply'"))),
+     "a new ticket pushes");
+
+  // Only an admin's own devices, or one admin could unenrol another's phone.
+  const unsub = server.slice(server.indexOf("app.post('/api/push/unsubscribe'"), server.indexOf("app.get('/api/push/devices'"));
+  ok(/admin_id=\$2/.test(unsub), "you can only remove your own devices");
+
+  ok(/addEventListener\('push'/.test(sw), "the service worker receives pushes");
+  ok(/notificationclick/.test(sw), "and clicking one opens the dashboard");
+  ok(/clients\.matchAll/.test(sw), "focusing an open tab rather than opening a second");
+
+  // A denied permission is sticky, so the UI has to say where to undo it.
+  ok(/site settings/i.test(html), "a blocked permission explains how to unblock it");
 }
 
 console.log(fails ? "\n" + fails + " FAILED" : "\nall passed");
