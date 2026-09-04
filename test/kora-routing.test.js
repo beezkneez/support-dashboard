@@ -73,7 +73,13 @@ const ok = (c, label, detail) => {
   ok(/content-type/.test(fwd) && /application\/json/.test(fwd),
      "the reply is checked for JSON before it is parsed");
   ok(/probably restarting/.test(fwd),
-     "and an HTML error page is reported as that, with the HTTP status");
+     "a gateway page is reported as a restart, with the HTTP status");
+  // A 404 and a 502 both arrive as HTML but mean opposite things: one spawn is
+  // on an older build and will never accept this until it is updated, the other
+  // is coming back in a minute. Telling someone to retry the first is telling
+  // them to wait for something that will not happen.
+  ok(/httpStatus === 404/.test(fwd), "a 404 is distinguished from a restart");
+  ok(/older build/.test(fwd), "and reported as the spawn needing an update");
   ok(!/\.then\(x => x\.json\(\)\)/.test(fwd), "no blind .json() parse");
 }
 

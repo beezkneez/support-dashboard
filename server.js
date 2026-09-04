@@ -999,15 +999,23 @@ app.post('/api/tickets/:id/forward', requireAdmin, async (req, res) => {
     }
 
     if (!r) {
-      // HTML back from a JSON endpoint almost always means the app is
-      // restarting or the route is not deployed there yet.
+      // HTML from a JSON endpoint has two quite different causes, and guessing
+      // wrong sends you looking in the wrong place. A 404 means that spawn does
+      // not have this route — it is on an older build, since passing a ticket
+      // down only exists from a certain release. A 5xx or a gateway page means
+      // it is genuinely restarting. Only the second is worth retrying.
       const looksLikeAnErrorPage = /^\s*<(!doctype|html)/i.test(raw);
-      return res.json({
-        ok: false,
-        reason: looksLikeAnErrorPage
-          ? 'That studio returned a web page instead of an answer (HTTP ' + httpStatus + '). It is probably restarting — try again in a minute.'
-          : 'That studio gave an unreadable reply (HTTP ' + httpStatus + ').'
-      });
+      let reason;
+      if (httpStatus === 404) {
+        reason = 'That studio is on an older build that cannot receive a passed-down ticket yet. '
+               + 'It needs updating first — reply here in the meantime.';
+      } else if (looksLikeAnErrorPage) {
+        reason = 'That studio returned a web page instead of an answer (HTTP ' + httpStatus + '). '
+               + 'It is probably restarting — try again in a minute.';
+      } else {
+        reason = 'That studio gave an unreadable reply (HTTP ' + httpStatus + ').';
+      }
+      return res.json({ ok: false, reason });
     }
     if (!r.ok) {
       return res.json({ ok: false, reason: 'That studio refused the forward: ' + (r.reason || 'no reason given') });
