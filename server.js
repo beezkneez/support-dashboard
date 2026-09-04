@@ -174,6 +174,36 @@ async function initDB() {
     await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS spawn TEXT`).catch(()=>{});
     await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS spawn_name TEXT`).catch(()=>{});
     await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS callback_url TEXT`).catch(()=>{});
+    // Kora. Every spawn now routes ALL support here rather than to its own
+    // studio admin, so this has to carry enough for the whole triage: the chat
+    // that produced the ticket, the screenshot, and where the person was.
+    await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS ai_session_id TEXT`).catch(()=>{});
+    await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS image_url TEXT`).catch(()=>{});
+    await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS page_context JSONB DEFAULT '{}'::jsonb`).catch(()=>{});
+    // Set when it has been handed down to the studio's own admin, which is the
+    // only way a ticket becomes visible on a spawn at all now.
+    await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS forwarded_at TIMESTAMPTZ`).catch(()=>{});
+    await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS forwarded_by TEXT`).catch(()=>{});
+    // Push, per device. Support is answered only here now, so “I did not see
+    // it” is a real failure. endpoint is UNIQUE so re-subscribing the same
+    // browser updates its row instead of doubling every notification.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS push_subscriptions (
+        id         SERIAL PRIMARY KEY,
+        admin_id   INTEGER REFERENCES admin_users(id) ON DELETE CASCADE,
+        endpoint   TEXT NOT NULL UNIQUE,
+        p256dh     TEXT NOT NULL,
+        auth       TEXT NOT NULL,
+        label      TEXT DEFAULT '',
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        last_ok    TIMESTAMPTZ
+      )
+    `).catch(()=>{});
+    // Email and push are independent switches, defaulting on — an admin who
+    // has never touched the settings should still be told about a ticket.
+    await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS push_new_ticket BOOLEAN DEFAULT TRUE`).catch(()=>{});
+    await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS push_user_reply BOOLEAN DEFAULT TRUE`).catch(()=>{});
+    await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS email_new_ticket BOOLEAN DEFAULT TRUE`).catch(()=>{});
     await client.query(`ALTER TABLE apps ADD COLUMN IF NOT EXISTS callback_url TEXT`).catch(()=>{});
     // Auto-configure the Aradia Time reply-back URL (only if not already set).
     await client.query(
@@ -278,21 +308,33 @@ app.get('/api/auth/me', requireAdmin, (req, res) => {
 // ── App Webhook Routes (called by aradia-time / kronara-build) ──────
 app.post('/api/hooks/ticket', requireApiKey, async (req, res) => {
   try {
-    const { externalId, tenantId, fromEmail, fromName, type, subject, body, spawn, spawnName, callbackUrl } = req.body;
+    const { externalId, tenantId, fromEmail, fromName, type, subject, body, spawn, spawnName, callbackUrl,
+            aiSessionId, imageUrl, pageContext } = req.body;
     if (!fromEmail || !body) return res.json({ ok: false, reason: 'fromEmail and body required' });
 
     const ticketId = uuidv4();
     await pool.query(
-      `INSERT INTO tickets (id, app_id, external_id, tenant_id, from_email, from_name, type, subject, spawn, spawn_name, callback_url)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      `INSERT INTO tickets (id, app_id, external_id, tenant_id, from_email, from_name, type, subject, spawn, spawn_name, callback_url,
+                            ai_session_id, image_url, page_context)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
       [ticketId, req.app.id, externalId || null, tenantId || null,
-       fromEmail, fromName || null, type || 'message', subject || '(no subject)', spawn || null, spawnName || null, callbackUrl || null]
+       fromEmail, fromName || null, type || 'message', subject || '(no subject)', spawn || null, spawnName || null, callbackUrl || null,
+       aiSessionId || null, imageUrl || null, JSON.stringify(pageContext || {})]
     );
 
     await pool.query(
       `INSERT INTO ticket_messages (ticket_id, sender_type, sender_name, sender_email, body, source)
        VALUES ($1,'user',$2,$3,$4,'app')`,
       [ticketId, fromName || fromEmail, fromEmail, body]
+    );
+
+    // Push first: it is the one that arrives while you are away from an inbox,
+    // and it is what makes answering support only here safe — nothing gets
+    // missed because nobody happened to be looking at their email.
+    pushToAdmins(
+      (type === 'bug' ? '🐛 Bug' : '💬 Support') + ' · ' + (spawnName || spawn || req.app.name),
+      (fromName || fromEmail) + ': ' + (subject || body),
+      '/', 'ticket'
     );
 
     // Notify admin via email
@@ -346,6 +388,11 @@ app.post('/api/hooks/ticket/:id/reply', requireApiKey, async (req, res) => {
     await pool.query(`UPDATE tickets SET updated_at=NOW(), status='open' WHERE id=$1`, [id]);
 
     // Notify admin
+    pushToAdmins(
+      '↩ Reply · ' + req.app.name,
+      (fromName || fromEmail) + ': ' + body,
+      '/', 'reply'
+    );
     sendMail({
       to: process.env.ADMIN_EMAIL,
       subject: `[${req.app.name}] Reply on: ${ticket.rows[0].subject || '(no subject)'}`,
@@ -396,6 +443,64 @@ app.post('/api/hooks/ticketExtReply', requireApiKey, async (req, res) => {
   } catch(e) {
     console.error('[hooks/ticketExtReply]', e);
     res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+// A studio handing a ticket back.
+//
+// The return leg of /api/tickets/:id/forward. A ticket is passed down because
+// it looked like something only that studio could answer; sometimes that is
+// wrong — it turns out to be a bug, or they have no idea either. Clearing
+// forwarded_at puts it back in this queue and takes it out of theirs, so it is
+// somebody's again rather than nobody's.
+app.post('/api/hooks/ticketPassBack', requireApiKey, async (req, res) => {
+  try {
+    const { externalId, note, passedBackBy } = req.body || {};
+    if (!externalId) return res.json({ ok: false, reason: 'Missing externalId' });
+
+    const q = await pool.query(
+      `SELECT t.*, a.name AS app_name FROM tickets t LEFT JOIN apps a ON a.id=t.app_id
+        WHERE t.external_id=$1 AND t.app_id=$2`, [externalId, req.app.id]);
+    if (!q.rows.length) return res.json({ ok: false, reason: 'Ticket not found' });
+    const t = q.rows[0];
+
+    await pool.query(
+      `UPDATE tickets SET forwarded_at=NULL, forwarded_by=NULL, status='open', updated_at=NOW() WHERE id=$1`,
+      [t.id]
+    );
+    await pool.query(
+      `INSERT INTO ticket_messages (ticket_id, sender_type, sender_name, sender_email, body, source)
+       VALUES ($1,'note',$2,'',$3,'dashboard')`,
+      [t.id, passedBackBy || 'The studio',
+       'Passed back by ' + (passedBackBy || 'the studio') + (note ? ': ' + note : ' — they could not answer it either.')]
+    );
+
+    res.json({ ok: true });
+
+    // Worth interrupting for: it was off your list, and now it is back on it
+    // with nobody else looking at it.
+    pushToAdmins(
+      '↩ Back to you · ' + (t.spawn_name || t.spawn || t.app_name || 'A studio'),
+      (passedBackBy || 'The studio') + ': ' + (note || t.subject || 'passed a ticket back'),
+      '/', 'ticket'
+    );
+    sendMail({
+      to: process.env.ADMIN_EMAIL,
+      subject: `[${t.app_name || 'Support'}] Passed back: ${t.subject || '(no subject)'}`,
+      html: `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;">
+        <div style="background:#6366f1;color:#fff;padding:16px 20px;border-radius:8px 8px 0 0;">
+          <strong>${t.spawn_name || t.spawn || 'A studio'}</strong> — passed a ticket back
+        </div>
+        <div style="border:1px solid #e5e7eb;border-top:0;padding:20px;border-radius:0 0 8px 8px;">
+          <p><strong>${passedBackBy || 'The studio'}</strong> could not answer this one.</p>
+          ${note ? `<div style="white-space:pre-wrap;background:#f8fafc;padding:12px;border-radius:6px;">${note}</div>` : ''}
+          <p><strong>Subject:</strong> ${t.subject || '(none)'}</p>
+          <p style="margin-top:16px;"><a href="${process.env.DASHBOARD_URL || ''}" style="display:inline-block;background:#6366f1;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;">Open the dashboard</a></p>
+        </div></div>`
+    }).catch(() => {});
+  } catch (e) {
+    console.error('[hooks/ticketPassBack]', e.message);
+    res.json({ ok: false, reason: e.message });
   }
 });
 
@@ -519,7 +624,14 @@ app.get('/api/tickets', requireAdmin, async (req, res) => {
     let params = [];
     let idx = 1;
 
-    if (status && status !== 'all') {
+    // 'active' means anything still needing you: open, or replied-to and
+    // waiting on them. Replying flips a ticket open -> in_progress, so a plain
+    // status=open view drops a ticket the instant you answer it — which was
+    // survivable when this was a second copy of the tickets and is not now that
+    // it is the only place they live.
+    if (status === 'active') {
+      where.push(`t.status IN ('open','in_progress')`);
+    } else if (status && status !== 'all') {
       where.push(`t.status=$${idx++}`);
       params.push(status);
     }
@@ -546,9 +658,11 @@ app.get('/api/tickets', requireAdmin, async (req, res) => {
        FROM tickets t
        LEFT JOIN apps a ON a.id = t.app_id
        ${whereClause}
-       ORDER BY
-         CASE t.status WHEN 'open' THEN 0 WHEN 'in_progress' THEN 1 ELSE 2 END,
-         t.updated_at DESC
+       -- Most recent activity first, full stop. Grouping every 'open' ticket
+       -- above every 'in_progress' one meant the ticket you just replied to
+       -- sank below older untouched ones -- you answer something and it moves
+       -- away from you. Whose turn it is shows on the row instead.
+       ORDER BY t.updated_at DESC
        LIMIT 200`,
       params
     );
@@ -670,6 +784,263 @@ app.post('/api/tickets/:id/reply', requireAdmin, async (req, res) => {
 });
 
 // Add internal note
+// Hand a ticket down to the studio's own admin.
+//
+// Every spawn now sends ALL support here rather than to its own admin panel,
+// because most of it is about how the software works and only one person can
+// answer that. But some of it isn't: "why was my timesheet flagged", "can you
+// approve my late shift" are questions for that studio, and nobody here can
+// answer them.
+//
+// So this is the release valve. Forwarding makes the ticket visible in that
+// spawn's own support screen — which is otherwise empty by design — and the
+// studio admin replies there. Their reply reaches the staff member through the
+// same path a reply from here would.
+
+// ── Push notifications for the dashboard ─────────────────────────────
+//
+// Support is answered here and nowhere else now, so "I didn't see it" is a
+// real failure mode rather than an inconvenience. Email alone loses to a busy
+// inbox; this is the same per-device Web Push setup the tenant apps use.
+//
+// Per device on purpose: one row per browser/phone, so enrolling a phone does
+// not un-enrol a laptop, and losing a device does not take the others with it.
+// Dead subscriptions are pruned when the push service rejects them — a
+// subscription outlives the browser profile that made it, and without pruning
+// the table fills with endpoints that will never deliver again.
+const webpush = require('web-push');
+
+const PUSH_READY = !!(process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY);
+if (PUSH_READY) {
+  webpush.setVapidDetails(
+    'mailto:' + (process.env.ADMIN_EMAIL || 'support@example.com'),
+    process.env.VAPID_PUBLIC_KEY,
+    process.env.VAPID_PRIVATE_KEY
+  );
+} else {
+  console.warn('[push] VAPID keys unset — push is off, email only.');
+}
+
+// Send to every device this admin has enrolled.
+async function pushToAdmins(title, body, url, category) {
+  if (!PUSH_READY) return;
+  try {
+    // Preference is per admin, per category. An admin with push off for a
+    // category simply has no rows returned for it.
+    const col = { ticket: 'push_new_ticket', reply: 'push_user_reply' }[category] || null;
+    const q = col
+      ? `SELECT s.* FROM push_subscriptions s
+           JOIN admin_users a ON a.id = s.admin_id
+          WHERE COALESCE(a.${col}, TRUE) = TRUE`
+      : `SELECT s.* FROM push_subscriptions s`;
+    const subs = (await pool.query(q)).rows;
+
+    await Promise.all(subs.map(async (s) => {
+      try {
+        await webpush.sendNotification(
+          { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } },
+          JSON.stringify({ title, body: String(body || '').slice(0, 180), url: url || '/' })
+        );
+        await pool.query(`UPDATE push_subscriptions SET last_ok = NOW() WHERE id = $1`, [s.id]).catch(() => {});
+      } catch (err) {
+        const code = err && err.statusCode;
+        // 404/410 mean the subscription is gone for good; 403 means the VAPID
+        // key no longer matches it. Keeping any of them just guarantees a
+        // failure on every future send.
+        if (code === 404 || code === 410 || code === 403) {
+          await pool.query(`DELETE FROM push_subscriptions WHERE id = $1`, [s.id]).catch(() => {});
+          console.log('[push] pruned a dead subscription (' + code + ')');
+        } else {
+          console.error('[push] send failed:', code || (err && err.message));
+        }
+      }
+    }));
+  } catch (e) {
+    console.error('[push]', e.message);
+  }
+}
+
+// The key the browser needs to subscribe. Public by definition.
+app.get('/api/push/key', requireAdmin, (req, res) => {
+  res.json({ ok: true, enabled: PUSH_READY, key: process.env.VAPID_PUBLIC_KEY || '' });
+});
+
+app.post('/api/push/subscribe', requireAdmin, async (req, res) => {
+  try {
+    const { endpoint, keys, label } = req.body || {};
+    if (!endpoint || !keys || !keys.p256dh || !keys.auth) {
+      return res.json({ ok: false, reason: 'Incomplete subscription.' });
+    }
+    // Endpoint is unique, so re-subscribing the same browser updates its row
+    // rather than adding a duplicate that would double every notification.
+    await pool.query(
+      `INSERT INTO push_subscriptions (admin_id, endpoint, p256dh, auth, label)
+       VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (endpoint) DO UPDATE
+         SET admin_id = EXCLUDED.admin_id, p256dh = EXCLUDED.p256dh,
+             auth = EXCLUDED.auth, label = EXCLUDED.label, last_ok = NOW()`,
+      [req.admin.id, endpoint, keys.p256dh, keys.auth, String(label || '').slice(0, 80)]
+    );
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[push subscribe]', e.message);
+    res.json({ ok: false, reason: e.message });
+  }
+});
+
+app.post('/api/push/unsubscribe', requireAdmin, async (req, res) => {
+  try {
+    const { endpoint, id } = req.body || {};
+    if (id) await pool.query(`DELETE FROM push_subscriptions WHERE id=$1 AND admin_id=$2`, [id, req.admin.id]);
+    else if (endpoint) await pool.query(`DELETE FROM push_subscriptions WHERE endpoint=$1`, [endpoint]);
+    else return res.json({ ok: false, reason: 'Nothing named to remove.' });
+    res.json({ ok: true });
+  } catch (e) {
+    res.json({ ok: false, reason: e.message });
+  }
+});
+
+// The devices you are enrolled on, so a lost phone can be removed from the
+// one you still have.
+app.get('/api/push/devices', requireAdmin, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT id, label, created_at, last_ok FROM push_subscriptions WHERE admin_id=$1 ORDER BY created_at DESC`,
+      [req.admin.id]);
+    const a = await pool.query(
+      `SELECT COALESCE(push_new_ticket,TRUE) AS push_new_ticket,
+              COALESCE(push_user_reply,TRUE) AS push_user_reply,
+              COALESCE(email_new_ticket,TRUE) AS email_new_ticket
+         FROM admin_users WHERE id=$1`, [req.admin.id]);
+    res.json({ ok: true, enabled: PUSH_READY, devices: r.rows, prefs: a.rows[0] || {} });
+  } catch (e) {
+    res.json({ ok: false, reason: e.message });
+  }
+});
+
+// Email and push are independent switches — you might want a phone buzz for a
+// new ticket but not an email, or both, or neither while you are away.
+app.post('/api/push/prefs', requireAdmin, async (req, res) => {
+  try {
+    const allowed = ['push_new_ticket', 'push_user_reply', 'email_new_ticket'];
+    const sets = [], vals = [];
+    for (const k of allowed) {
+      if (typeof req.body[k] === 'boolean') { sets.push(`${k}=$${sets.length + 1}`); vals.push(req.body[k]); }
+    }
+    if (!sets.length) return res.json({ ok: true });
+    vals.push(req.admin.id);
+    await pool.query(`UPDATE admin_users SET ${sets.join(',')} WHERE id=$${vals.length}`, vals);
+    res.json({ ok: true });
+  } catch (e) {
+    res.json({ ok: false, reason: e.message });
+  }
+});
+
+// Prove it works on this device before trusting it with a real ticket.
+app.post('/api/push/test', requireAdmin, async (req, res) => {
+  if (!PUSH_READY) return res.json({ ok: false, reason: 'Push is not configured on the server.' });
+  const n = (await pool.query(`SELECT COUNT(*)::int c FROM push_subscriptions WHERE admin_id=$1`, [req.admin.id])).rows[0].c;
+  if (!n) return res.json({ ok: false, reason: 'No devices enrolled yet — turn on notifications first.' });
+  await pushToAdmins('Support Dashboard', 'Test notification — push is working.', '/', null);
+  res.json({ ok: true, devices: n });
+});
+
+app.post('/api/tickets/:id/forward', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const note = String(req.body.note || '').trim();
+
+    const q = await pool.query(
+      `SELECT t.*, a.api_key AS app_api_key, a.callback_url AS app_callback_url
+         FROM tickets t LEFT JOIN apps a ON a.id = t.app_id
+        WHERE t.id = $1`, [id]
+    );
+    if (!q.rows.length) return res.json({ ok: false, reason: 'Not found' });
+    const t = q.rows[0];
+
+    if (t.forwarded_at) {
+      return res.json({ ok: true, alreadyForwarded: true, forwardedAt: t.forwarded_at });
+    }
+
+    const base = t.callback_url || t.app_callback_url;
+    if (!base || !t.external_id || !t.app_api_key) {
+      // Without a callback there is nowhere to forward TO. Say so rather than
+      // marking it forwarded and letting it disappear into a gap.
+      return res.json({
+        ok: false,
+        reason: 'That spawn has no callback URL registered, so it cannot receive a forward. Reply here instead.'
+      });
+    }
+
+    // Read the status and the content type before parsing.
+    //
+    // Blindly calling .json() means any non-JSON response surfaces as
+    // "Unexpected token '<'", which tells the reader nothing and hides the
+    // actual cause — a spawn mid-restart serving its host's HTML error page
+    // looks identical to a genuine refusal. The status is the useful part.
+    let r, httpStatus = 0, raw = '';
+    try {
+      const resp = await fetch(base.replace(/\/$/, '') + '/api/hooks/ticketForward', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': t.app_api_key },
+        body: JSON.stringify({
+          externalId: t.external_id,
+          note,
+          forwardedBy: req.admin.name || req.admin.email || 'Support',
+        }),
+      });
+      httpStatus = resp.status;
+      raw = await resp.text();
+      if ((resp.headers.get('content-type') || '').includes('application/json')) {
+        try { r = JSON.parse(raw); } catch (_) { r = null; }
+      }
+    } catch (err) {
+      return res.json({ ok: false, reason: 'Could not reach that studio (' + err.message + '). It may be restarting — try again in a moment.' });
+    }
+
+    if (!r) {
+      // HTML from a JSON endpoint has two quite different causes, and guessing
+      // wrong sends you looking in the wrong place. A 404 means that spawn does
+      // not have this route — it is on an older build, since passing a ticket
+      // down only exists from a certain release. A 5xx or a gateway page means
+      // it is genuinely restarting. Only the second is worth retrying.
+      const looksLikeAnErrorPage = /^\s*<(!doctype|html)/i.test(raw);
+      let reason;
+      if (httpStatus === 404) {
+        reason = 'That studio is on an older build that cannot receive a passed-down ticket yet. '
+               + 'It needs updating first — reply here in the meantime.';
+      } else if (looksLikeAnErrorPage) {
+        reason = 'That studio returned a web page instead of an answer (HTTP ' + httpStatus + '). '
+               + 'It is probably restarting — try again in a minute.';
+      } else {
+        reason = 'That studio gave an unreadable reply (HTTP ' + httpStatus + ').';
+      }
+      return res.json({ ok: false, reason });
+    }
+    if (!r.ok) {
+      return res.json({ ok: false, reason: 'That studio refused the forward: ' + (r.reason || 'no reason given') });
+    }
+
+    await pool.query(
+      `UPDATE tickets SET forwarded_at = NOW(), forwarded_by = $2, updated_at = NOW() WHERE id = $1`,
+      [id, req.admin.name || req.admin.email || 'Support']
+    );
+    // Recorded as a note so the trail reads in order alongside the replies,
+    // rather than being a flag you have to go looking for.
+    await pool.query(
+      `INSERT INTO ticket_messages (ticket_id, sender_type, sender_name, sender_email, body, source)
+       VALUES ($1,'note',$2,$3,$4,'dashboard')`,
+      [id, req.admin.name || 'Support', req.admin.email || '',
+       'Forwarded to the studio admin' + (note ? ': ' + note : '.')]
+    );
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[ticket forward]', e.message);
+    res.json({ ok: false, reason: e.message });
+  }
+});
+
 app.post('/api/tickets/:id/note', requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;

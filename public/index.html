@@ -108,6 +108,8 @@
   /* ── Stats ──────────────────────── */
   .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 24px; }
   .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+  .stat-clickable { cursor: pointer; transition: .15s; }
+  .stat-clickable:hover { border-color: var(--accent); transform: translateY(-1px); box-shadow: var(--shadow); }
   .stat-card .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 4px; }
   .stat-card .value { font-size: 28px; font-weight: 700; }
   .stat-card .value.text-warn { color: var(--warn); }
@@ -145,6 +147,18 @@
   .msg-bubble .msg-body { white-space: pre-wrap; font-size: 14px; line-height: 1.6; }
   .msg-bubble .msg-source { font-size: 11px; color: var(--muted); margin-top: 8px; }
 
+  /* Kora context. A ticket is triaged here and nowhere else now, so the page,
+     device and the errors their browser logged have to be readable at a glance
+     rather than buried in the body text. */
+  .kora-ctx { background: var(--note-bg); border: 1px solid var(--note-border); border-radius: var(--radius); padding: 12px 16px; margin: 0 0 16px; }
+  .kora-ctx-title { font-size: 12px; font-weight: 800; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 8px; }
+  .kora-ctx-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 6px 18px; font-size: 13px; }
+  .kora-ctx-grid span { color: var(--muted); margin-right: 6px; }
+  .kora-ctx-errs { margin-top: 10px; font-size: 12px; }
+  .kora-ctx-errs span { color: var(--muted); display: block; margin-bottom: 3px; }
+  .kora-ctx-errs code { display: block; white-space: pre-wrap; word-break: break-word; background: rgba(0,0,0,.05); padding: 7px 9px; border-radius: 6px; font-size: 11.5px; }
+  .kora-ctx-shot { display: block; margin-top: 10px; max-width: 260px; border-radius: 8px; border: 1px solid var(--note-border); }
+  .fwd-badge { font-size: 12px; font-weight: 700; color: #4338ca; background: #eef2ff; border-radius: 6px; padding: 4px 10px; }
   .note-bubble { background: var(--note-bg); border: 1px solid var(--note-border); padding: 12px 16px; border-radius: var(--radius); margin-bottom: 8px; font-size: 13px; }
   .note-bubble .note-header { font-size: 12px; color: var(--note-text); margin-bottom: 4px; }
 
@@ -262,9 +276,10 @@
       <div class="filters">
         <input type="text" id="searchInput" placeholder="Search by name, email, subject..." oninput="debounceLoadTickets()">
         <select id="filterStatus" onchange="loadTickets()">
+          <option value="active" selected>Active</option>
           <option value="all">All Status</option>
-          <option value="open" selected>Open</option>
-          <option value="in_progress">In Progress</option>
+          <option value="open">Needs you</option>
+          <option value="in_progress">Waiting on them</option>
           <option value="resolved">Resolved</option>
           <option value="closed">Closed</option>
         </select>
@@ -390,6 +405,25 @@
 
     <div id="pageSettings" class="hidden">
       <h1 class="page-title">Settings</h1>
+
+      <!-- Support is answered only here now, so being told promptly is part of
+           the system working rather than a nicety. -->
+      <div class="card" style="margin-bottom:16px;">
+        <h3 style="margin-bottom:6px;">Notifications</h3>
+        <p style="font-size:13px;color:var(--muted);margin-bottom:16px;">
+          Every studio's support now comes here and nowhere else, so it is worth
+          being told. Push is per device — enrol each phone or laptop you want
+          buzzed, and removing one leaves the others alone.
+        </p>
+        <div id="notifPrefs"></div>
+        <div id="pushDevices" style="margin-top:16px;"></div>
+        <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;">
+          <button class="btn btn-primary btn-sm" id="pushEnableBtn" onclick="enablePush()">Turn on notifications for this device</button>
+          <button class="btn btn-ghost btn-sm" onclick="testPush()">Send a test</button>
+        </div>
+        <div id="pushMsg" style="font-size:12.5px;color:var(--muted);margin-top:10px;"></div>
+      </div>
+
       <div class="card">
         <h3 style="margin-bottom:16px;">Connected Apps</h3>
         <p style="font-size:13px;color:var(--muted);margin-bottom:16px;">
@@ -539,20 +573,24 @@ async function loadDashboard() {
   if (openCount > 0) { badge.textContent = openCount; badge.classList.remove('hidden'); }
   else { badge.classList.add('hidden'); }
 
+  // The tiles are the fastest route to a filtered list, so they are buttons.
+  // The labels say whose turn it is, because "Open" and "In Progress" do not:
+  // a ticket goes back to 'open' when the user replies, so open really means
+  // "waiting on you" and in_progress means "waiting on them".
   document.getElementById('statsGrid').innerHTML = `
-    <div class="stat-card">
-      <div class="label">Open</div>
+    <div class="stat-card stat-clickable" onclick="showTicketsFiltered('open')" title="New, or they have replied and are waiting on you">
+      <div class="label">Needs you</div>
       <div class="value text-warn">${s.open_count}</div>
     </div>
-    <div class="stat-card">
-      <div class="label">In Progress</div>
+    <div class="stat-card stat-clickable" onclick="showTicketsFiltered('in_progress')" title="You have replied and are waiting on them">
+      <div class="label">Waiting on them</div>
       <div class="value text-info">${s.in_progress_count}</div>
     </div>
-    <div class="stat-card">
+    <div class="stat-card stat-clickable" onclick="showTicketsFiltered('resolved')">
       <div class="label">Resolved</div>
       <div class="value text-success">${s.resolved_count}</div>
     </div>
-    <div class="stat-card">
+    <div class="stat-card stat-clickable" onclick="showTicketsFiltered('all')">
       <div class="label">Today</div>
       <div class="value">${s.today_count}</div>
     </div>
@@ -564,9 +602,23 @@ async function loadDashboard() {
     `).join('')}
   `;
 
-  // Recent open tickets
-  const tr = await api('GET', '/api/tickets?status=open');
+  // Anything still live, not just untouched ones — a ticket you have replied
+  // to is still yours until it is resolved.
+  const tr = await api('GET', '/api/tickets?status=active');
   if (tr.ok) renderTicketList('recentTickets', tr.tickets.slice(0, 10));
+}
+
+// Jump from a stat tile straight to that slice of the list. Reading a number
+// and then having to go and reproduce the filter by hand is the kind of small
+// friction that makes a dashboard feel like paperwork.
+function showTicketsFiltered(status) {
+  showPage('tickets');
+  const sel = document.getElementById('filterStatus');
+  if (sel) sel.value = status;
+  const app = document.getElementById('filterApp'); if (app) app.value = 'all';
+  const type = document.getElementById('filterType'); if (type) type.value = 'all';
+  const q = document.getElementById('searchInput'); if (q) q.value = '';
+  loadTickets();
 }
 
 // ── Tickets ────────────────────────────────────────────────────────
@@ -618,6 +670,47 @@ function renderTicketList(containerId, tickets) {
 }
 
 // ── Ticket Detail ──────────────────────────────────────────────────
+// Everything the spawn attached, laid out so triage does not need a reply just
+// to ask "which page were you on". A ticket that came from Kora arrives with
+// the whole chat in its body plus this.
+function koraContextPanel(t) {
+  const c = t.page_context || {};
+  const bits = [];
+  if (c.tab)          bits.push(['Page', c.tab]);
+  if (c.buildVersion) bits.push(['Build', String(c.buildVersion).slice(0, 12)]);
+  if (c.viewport)     bits.push(['Screen', c.viewport + (c.dpr ? ' @' + c.dpr + 'x' : '')]);
+  if (c.theme)        bits.push(['Theme', c.theme]);
+  if (c.ua)           bits.push(['Device', String(c.ua).slice(0, 90)]);
+  if (c.online === false) bits.push(['Network', 'offline at the time']);
+
+  const errs = Array.isArray(c.recentErrors) ? c.recentErrors : [];
+  // Only ever render an http(s) image. A spawn without Bunny storage falls back
+  // to keeping the raw data URL, and that is fine in an <img> but must not be
+  // treated as a link.
+  const shot = t.image_url && /^https?:\/\//i.test(t.image_url) ? t.image_url
+             : (t.image_url && /^data:image\//i.test(t.image_url) ? t.image_url : '');
+
+  if (!bits.length && !errs.length && !shot) return '';
+
+  return `
+    <div class="kora-ctx">
+      <div class="kora-ctx-title">Where this came from</div>
+      ${bits.length ? `<div class="kora-ctx-grid">${bits.map(([k, v]) =>
+        `<div><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join('')}</div>` : ''}
+      ${errs.length ? `<div class="kora-ctx-errs"><span>Errors on their device just before this</span>
+        <code>${esc(errs.join(String.fromCharCode(10)))}</code></div>` : ''}
+      ${shot ? `<a href="${shot}" target="_blank" rel="noopener"><img class="kora-ctx-shot" src="${shot}" alt="screenshot they attached"></a>` : ''}
+    </div>`;
+}
+
+async function forwardTicket(id) {
+  const note = prompt("Pass this to the studio's own admin? Optional note for them (why it is theirs):");
+  if (note === null) return;
+  const r = await api('POST', '/api/tickets/' + id + '/forward', { note });
+  if (!r.ok) { alert(r.reason || 'Could not forward that.'); return; }
+  openTicket(id);
+}
+
 async function openTicket(id) {
   showPage('ticketDetail');
   const el = document.getElementById('ticketDetail');
@@ -657,9 +750,14 @@ async function openTicket(id) {
             `<option value="${p}" ${p===t.priority?'selected':''}>${p}</option>`
           ).join('')}
         </select>
+        ${t.forwarded_at
+          ? `<span class="fwd-badge" title="Passed to the studio's own admin">→ with the studio</span>`
+          : `<button class="btn btn-ghost btn-sm" onclick="forwardTicket('${t.id}')" title="Only that studio can answer this">→ Pass to studio admin</button>`}
         <button class="btn btn-danger btn-sm" onclick="deleteTicket('${t.id}')">Delete</button>
       </div>
     </div>
+
+    ${koraContextPanel(t)}
 
     <div class="message-thread">
       ${msgs.map(m => `
@@ -965,6 +1063,120 @@ checkAuth();
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(() => {});
 }
+
+// ── Push, client side ────────────────────────────────────────────────
+//
+// Per device, deliberately. One subscription belongs to one browser on one
+// machine, so enrolling a phone must not un-enrol the laptop, and losing a
+// phone should be fixable from whatever you still have in your hand.
+
+function b64ToU8(base64) {
+  const pad = '='.repeat((4 - (base64.length % 4)) % 4);
+  const raw = atob((base64 + pad).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
+}
+
+// A label you will recognise later, when the list is three rows long and you
+// need to know which one is the phone you dropped in a river.
+function deviceLabel() {
+  const ua = navigator.userAgent;
+  const os = /iPhone|iPad/.test(ua) ? 'iPhone/iPad'
+           : /Android/.test(ua) ? 'Android'
+           : /Mac OS X/.test(ua) ? 'Mac'
+           : /Windows/.test(ua) ? 'Windows' : 'Device';
+  const br = /Edg\//.test(ua) ? 'Edge'
+           : /Chrome\//.test(ua) ? 'Chrome'
+           : /Safari\//.test(ua) ? 'Safari'
+           : /Firefox\//.test(ua) ? 'Firefox' : 'Browser';
+  return os + ' · ' + br;
+}
+
+async function loadPushSettings() {
+  const r = await api('GET', '/api/push/devices');
+  const prefsEl = document.getElementById('notifPrefs');
+  const devEl = document.getElementById('pushDevices');
+  if (!r.ok) { devEl.innerHTML = '<p style="font-size:13px;color:var(--muted);">Could not load notification settings.</p>'; return; }
+
+  const p = r.prefs || {};
+  const row = (key, label, hint) => `
+    <label style="display:flex;align-items:flex-start;gap:10px;margin-bottom:10px;font-size:13.5px;cursor:pointer;">
+      <input type="checkbox" ${p[key] !== false ? 'checked' : ''} onchange="savePushPref('${key}', this.checked)" style="margin-top:2px;">
+      <span><b>${label}</b><br><span style="color:var(--muted);font-size:12.5px;">${hint}</span></span>
+    </label>`;
+
+  prefsEl.innerHTML =
+    row('push_new_ticket', 'Push me when a ticket arrives', 'Any studio, any spawn — this is the one that matters.') +
+    row('push_user_reply', 'Push me when someone replies', 'A reply on a ticket you are already in.') +
+    row('email_new_ticket', 'Email me as well', 'Independent of push. Off means push only.') +
+    (r.enabled ? '' : '<p style="font-size:12.5px;color:var(--danger,#b91c1c);margin-top:8px;">Push is not configured on the server (VAPID keys unset) — email only until it is.</p>');
+
+  devEl.innerHTML = (r.devices || []).length
+    ? '<h4 style="font-size:13px;color:var(--muted);margin-bottom:8px;">Enrolled devices</h4>' +
+      r.devices.map(d => `
+        <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);font-size:13px;">
+          <span style="flex:1;">${esc(d.label || 'Device')}
+            <span style="color:var(--muted);font-size:11.5px;"> · added ${new Date(d.created_at).toLocaleDateString()}${d.last_ok ? ' · last used ' + new Date(d.last_ok).toLocaleDateString() : ''}</span>
+          </span>
+          <button class="btn btn-ghost btn-sm" onclick="removePushDevice(${d.id})">Remove</button>
+        </div>`).join('')
+    : '<p style="font-size:13px;color:var(--muted);">No devices enrolled yet.</p>';
+}
+
+async function savePushPref(key, val) {
+  await api('POST', '/api/push/prefs', { [key]: val });
+}
+
+async function removePushDevice(id) {
+  await api('POST', '/api/push/unsubscribe', { id });
+  loadPushSettings();
+}
+
+async function enablePush() {
+  const msg = document.getElementById('pushMsg');
+  const set = (t) => { msg.textContent = t; };
+  try {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+      return set('This browser does not support push notifications.');
+    }
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') {
+      // Denied is sticky — the page cannot ask again, so say where to undo it
+      // rather than letting them tap a button that will never work.
+      return set(perm === 'denied'
+        ? 'Notifications are blocked for this site. Allow them in your browser’s site settings, then try again.'
+        : 'Notifications were not allowed.');
+    }
+
+    const k = await api('GET', '/api/push/key');
+    if (!k.ok || !k.enabled || !k.key) return set('Push is not configured on the server yet.');
+
+    const reg = await navigator.serviceWorker.register('/sw.js');
+    await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: b64ToU8(k.key),
+    });
+
+    const j = sub.toJSON();
+    const r = await api('POST', '/api/push/subscribe', {
+      endpoint: j.endpoint, keys: j.keys, label: deviceLabel(),
+    });
+    if (!r.ok) return set(r.reason || 'Could not save this device.');
+    set('This device is enrolled.');
+    loadPushSettings();
+  } catch (e) {
+    set('Could not turn on notifications: ' + e.message);
+  }
+}
+
+async function testPush() {
+  const msg = document.getElementById('pushMsg');
+  const r = await api('POST', '/api/push/test', {});
+  msg.textContent = r.ok
+    ? 'Sent to ' + r.devices + ' device(s) — it should appear shortly.'
+    : (r.reason || 'Could not send a test.');
+}
+
 </script>
 </body>
 </html>
