@@ -446,6 +446,64 @@ app.post('/api/hooks/ticketExtReply', requireApiKey, async (req, res) => {
   }
 });
 
+// A studio handing a ticket back.
+//
+// The return leg of /api/tickets/:id/forward. A ticket is passed down because
+// it looked like something only that studio could answer; sometimes that is
+// wrong — it turns out to be a bug, or they have no idea either. Clearing
+// forwarded_at puts it back in this queue and takes it out of theirs, so it is
+// somebody's again rather than nobody's.
+app.post('/api/hooks/ticketPassBack', requireApiKey, async (req, res) => {
+  try {
+    const { externalId, note, passedBackBy } = req.body || {};
+    if (!externalId) return res.json({ ok: false, reason: 'Missing externalId' });
+
+    const q = await pool.query(
+      `SELECT t.*, a.name AS app_name FROM tickets t LEFT JOIN apps a ON a.id=t.app_id
+        WHERE t.external_id=$1 AND t.app_id=$2`, [externalId, req.app.id]);
+    if (!q.rows.length) return res.json({ ok: false, reason: 'Ticket not found' });
+    const t = q.rows[0];
+
+    await pool.query(
+      `UPDATE tickets SET forwarded_at=NULL, forwarded_by=NULL, status='open', updated_at=NOW() WHERE id=$1`,
+      [t.id]
+    );
+    await pool.query(
+      `INSERT INTO ticket_messages (ticket_id, sender_type, sender_name, sender_email, body, source)
+       VALUES ($1,'note',$2,'',$3,'dashboard')`,
+      [t.id, passedBackBy || 'The studio',
+       'Passed back by ' + (passedBackBy || 'the studio') + (note ? ': ' + note : ' — they could not answer it either.')]
+    );
+
+    res.json({ ok: true });
+
+    // Worth interrupting for: it was off your list, and now it is back on it
+    // with nobody else looking at it.
+    pushToAdmins(
+      '↩ Back to you · ' + (t.spawn_name || t.spawn || t.app_name || 'A studio'),
+      (passedBackBy || 'The studio') + ': ' + (note || t.subject || 'passed a ticket back'),
+      '/', 'ticket'
+    );
+    sendMail({
+      to: process.env.ADMIN_EMAIL,
+      subject: `[${t.app_name || 'Support'}] Passed back: ${t.subject || '(no subject)'}`,
+      html: `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;">
+        <div style="background:#6366f1;color:#fff;padding:16px 20px;border-radius:8px 8px 0 0;">
+          <strong>${t.spawn_name || t.spawn || 'A studio'}</strong> — passed a ticket back
+        </div>
+        <div style="border:1px solid #e5e7eb;border-top:0;padding:20px;border-radius:0 0 8px 8px;">
+          <p><strong>${passedBackBy || 'The studio'}</strong> could not answer this one.</p>
+          ${note ? `<div style="white-space:pre-wrap;background:#f8fafc;padding:12px;border-radius:6px;">${note}</div>` : ''}
+          <p><strong>Subject:</strong> ${t.subject || '(none)'}</p>
+          <p style="margin-top:16px;"><a href="${process.env.DASHBOARD_URL || ''}" style="display:inline-block;background:#6366f1;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;">Open the dashboard</a></p>
+        </div></div>`
+    }).catch(() => {});
+  } catch (e) {
+    console.error('[hooks/ticketPassBack]', e.message);
+    res.json({ ok: false, reason: e.message });
+  }
+});
+
 // ── Kronara app directory: a spawn announcing itself ───────────────────────
 // Called by every spawn on boot and every 6h after (announceTenantToDirectory
 // in the tenant's server.js). The repeat is what makes the directory
