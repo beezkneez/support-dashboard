@@ -166,5 +166,68 @@ const ok = (c, label, detail) => {
   ok(/site settings/i.test(html), "a blocked permission explains how to unblock it");
 }
 
+// ── Requests a studio was sent directly ─────────────────────────────
+{
+  // Forwarding every studio question through one person does not survive a
+  // dozen studios, so people can now address one to their studio themselves.
+  // It still arrives here — that is what keeps "nothing goes unseen" true —
+  // but it is not this dashboard's work.
+  ok(/ADD COLUMN IF NOT EXISTS destination TEXT DEFAULT 'kronara'/.test(server),
+     "a ticket records which way it came in");
+  // An older spawn sends no destination. Reading that as ours is the safe
+  // default; the other way files a studio's traffic as already handled.
+  const hook = server.slice(server.indexOf("app.post('/api/hooks/ticket'"),
+                            server.indexOf("app.post('/api/hooks/ticket/:id/reply'"));
+  ok(/destination === 'studio' \? 'studio' : 'kronara'/.test(hook),
+     "…defaulting to ours when a spawn does not say");
+  ok(/INSERT INTO tickets[\s\S]{0,400}destination/.test(hook), "and stores it");
+
+  // Pushing every studio's own business to one phone is the same bottleneck
+  // rebuilt as a notification stream.
+  const silentIdx = hook.indexOf("if (dest === 'studio')");
+  const pushIdx   = hook.indexOf("pushToAdmins(");
+  ok(silentIdx > 0 && silentIdx < pushIdx,
+     "a studio-bound ticket is recorded silently — no push, no email");
+}
+
+// ── Whose turn it is, as a filter ───────────────────────────────────
+{
+  const list = server.slice(server.indexOf("app.get('/api/tickets'"), server.indexOf("app.get('/api/tickets/:id'"));
+  ok(/queue === 'mine'/.test(list) && /queue === 'studio'/.test(list),
+     "the list can be sliced by whose problem it is");
+  ok(/t\.forwarded_at IS NOT NULL OR t\.destination='studio'/.test(list),
+     "'with a studio' merges passed-down and sent-direct — one section, since whose turn it is matters more than how it got there");
+  // Chasing a stalled ticket is yours even though answering it is not.
+  ok(/t\.destination IS DISTINCT FROM 'studio' OR t\.stale_at IS NOT NULL/.test(list),
+     "…and one that has gone quiet joins your own queue");
+
+  ok(/queue=mine/.test(html) && /queue=studio/.test(html),
+     "the home page asks for both and shows them separately");
+  ok(/>With a studio</.test(html), "with a section that says what it is");
+  ok(/id="filterQueue"/.test(html), "and the ticket list has the same filter");
+}
+
+// ── Silence is the thing that interrupts you ────────────────────────
+{
+  const stale = server.slice(server.indexOf("app.post('/api/hooks/ticketStale'"),
+                             server.indexOf("app.post('/api/hooks/registerTenant'"));
+  ok(stale.length > 400, "found the stale hook");
+  ok(/requireApiKey/.test(stale), "only a spawn can report one");
+  ok(/if \(t\.stale_at \|\| t\.destination !== 'studio'\)/.test(stale),
+     "flagging twice, or flagging one already pulled back, is a no-op");
+  ok(/pushToAdmins\(/.test(stale) && /sendMail\(/.test(stale),
+     "this one does interrupt — somebody has been waiting with nobody on it");
+  // The ticket is not seized. Surfacing it is the whole intervention.
+  ok(!/destination='kronara'/.test(stale), "…without taking the ticket off the studio");
+
+  // Pass-back has to undo BOTH routes in, or a directly-addressed ticket comes
+  // back and stays filed as the studio's at the same time.
+  const pbk = server.slice(server.indexOf("app.post('/api/hooks/ticketPassBack'"),
+                           server.indexOf("app.post('/api/hooks/ticketStale'"));
+  ok(pbk.length > 400, "found the pass-back hook");
+  ok(/destination='kronara'/.test(pbk), "handing one back files it as ours again");
+  ok(/stale_at=NULL/.test(pbk), "and clears the quiet flag, since it is nobody's to ignore now");
+}
+
 console.log(fails ? "\n" + fails + " FAILED" : "\nall passed");
 process.exit(fails ? 1 : 0);

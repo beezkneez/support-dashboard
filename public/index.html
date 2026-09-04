@@ -266,8 +266,19 @@
     <div id="pageDashboard">
       <h1 class="page-title">Dashboard</h1>
       <div class="stats-grid" id="statsGrid"></div>
-      <h3 style="margin-bottom:12px;font-size:16px;">Recent Open Tickets</h3>
+      <h3 style="margin-bottom:12px;font-size:16px;">Yours to answer</h3>
       <div class="card" style="padding:0;overflow:hidden;" id="recentTickets"></div>
+
+      <!-- Hidden until there is something in it, so a quiet week does not show
+           an empty box. Anything here is being handled by a studio; the ones
+           that stopped being handled move up into the list above. -->
+      <h3 id="studioTicketsHead" style="display:none;margin:26px 0 12px;font-size:16px;">
+        With a studio <span class="count" style="color:var(--muted);font-weight:400;"></span>
+        <span style="display:block;font-size:12px;font-weight:400;color:var(--muted);margin-top:2px;">
+          Theirs to answer. You will be told if one goes unanswered.
+        </span>
+      </h3>
+      <div class="card" style="padding:0;overflow:hidden;display:none;" id="studioTickets"></div>
     </div>
 
     <!-- ── Tickets Page ── -->
@@ -282,6 +293,11 @@
           <option value="in_progress">Waiting on them</option>
           <option value="resolved">Resolved</option>
           <option value="closed">Closed</option>
+        </select>
+        <select id="filterQueue" onchange="loadTickets()">
+          <option value="all">Everyone's</option>
+          <option value="mine">Mine to answer</option>
+          <option value="studio">With a studio</option>
         </select>
         <select id="filterApp" onchange="loadTickets()"></select>
         <select id="filterType" onchange="loadTickets()">
@@ -586,6 +602,15 @@ async function loadDashboard() {
       <div class="label">Waiting on them</div>
       <div class="value text-info">${s.in_progress_count}</div>
     </div>
+    <div class="stat-card stat-clickable" onclick="showTicketsFiltered('active','studio')" title="With a studio — passed down by you, or sent straight to them">
+      <div class="label">With a studio</div>
+      <div class="value text-info">${s.with_studio_count ?? 0}</div>
+    </div>
+    ${Number(s.stale_count) > 0 ? `
+    <div class="stat-card stat-clickable" onclick="showTicketsFiltered('active','mine')" title="Sent to a studio and nobody there has replied">
+      <div class="label">Gone quiet</div>
+      <div class="value text-warn">${s.stale_count}</div>
+    </div>` : ''}
     <div class="stat-card stat-clickable" onclick="showTicketsFiltered('resolved')">
       <div class="label">Resolved</div>
       <div class="value text-success">${s.resolved_count}</div>
@@ -602,19 +627,43 @@ async function loadDashboard() {
     `).join('')}
   `;
 
+  // Two lists, because they are two different jobs.
+  //
+  // The top one is what needs answering here. The second is what studios are
+  // handling — visible on purpose, so the traffic that no longer comes through
+  // you is still something you can see rather than something you have to trust
+  // is happening. Anything in it that has gone quiet is pulled up into the
+  // first list, since chasing it is yours even when answering it is not.
+  //
   // Anything still live, not just untouched ones — a ticket you have replied
   // to is still yours until it is resolved.
-  const tr = await api('GET', '/api/tickets?status=active');
-  if (tr.ok) renderTicketList('recentTickets', tr.tickets.slice(0, 10));
+  const [mine, studio] = await Promise.all([
+    api('GET', '/api/tickets?status=active&queue=mine'),
+    api('GET', '/api/tickets?status=active&queue=studio'),
+  ]);
+  if (mine.ok) renderTicketList('recentTickets', mine.tickets.slice(0, 10));
+
+  const box = document.getElementById('studioTickets');
+  const head = document.getElementById('studioTicketsHead');
+  if (box && head) {
+    const n = studio.ok ? studio.tickets.length : 0;
+    head.style.display = n ? '' : 'none';
+    box.style.display  = n ? '' : 'none';
+    if (n) {
+      head.querySelector('.count').textContent = n;
+      renderTicketList('studioTickets', studio.tickets.slice(0, 10));
+    }
+  }
 }
 
 // Jump from a stat tile straight to that slice of the list. Reading a number
 // and then having to go and reproduce the filter by hand is the kind of small
 // friction that makes a dashboard feel like paperwork.
-function showTicketsFiltered(status) {
+function showTicketsFiltered(status, queue) {
   showPage('tickets');
   const sel = document.getElementById('filterStatus');
   if (sel) sel.value = status;
+  const qq = document.getElementById('filterQueue'); if (qq) qq.value = queue || 'all';
   const app = document.getElementById('filterApp'); if (app) app.value = 'all';
   const type = document.getElementById('filterType'); if (type) type.value = 'all';
   const q = document.getElementById('searchInput'); if (q) q.value = '';
@@ -634,7 +683,10 @@ async function loadTickets() {
   const type = document.getElementById('filterType').value;
   const search = document.getElementById('searchInput').value.trim();
 
+  const queue = (document.getElementById('filterQueue') || {}).value || 'all';
+
   if (status !== 'all') params.set('status', status);
+  if (queue !== 'all') params.set('queue', queue);
   if (appSlug !== 'all') params.set('app', appSlug);
   if (type !== 'all') params.set('type', type);
   if (search) params.set('search', search);
@@ -654,6 +706,12 @@ function renderTicketList(containerId, tickets) {
       <span class="app-dot" style="background:${t.app_color || '#6366f1'}" title="${t.app_name || ''}"></span>
       <span class="type-badge type-${t.type}">${t.type}</span>
       ${(t.spawn_name || t.spawn) ? `<span style="display:inline-block;background:#eef2ff;color:#4338ca;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700;white-space:nowrap;">🏢 ${esc(t.spawn_name || t.spawn)}</span>` : ''}
+      ${t.stale_at ? `<span title="Sent to the studio and nobody there has replied" style="display:inline-block;background:#fef3c7;color:#92400e;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700;white-space:nowrap;">⏳ No reply</span>`
+        : (t.destination === 'studio' && !t.forwarded_at)
+          ? `<span title="They sent this straight to their studio — you did not pass it down" style="display:inline-block;background:#ecfdf5;color:#065f46;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700;white-space:nowrap;">→ Theirs</span>`
+        : t.forwarded_at
+          ? `<span title="You passed this down to the studio" style="display:inline-block;background:#f1f5f9;color:#475569;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700;white-space:nowrap;">↓ Passed down</span>`
+        : ''}
       <div class="subject">
         ${esc(t.subject || '(no subject)')}
         <span class="preview">${esc((t.first_message || '').substring(0, 60))}</span>

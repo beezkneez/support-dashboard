@@ -184,6 +184,14 @@ async function initDB() {
     // only way a ticket becomes visible on a spawn at all now.
     await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS forwarded_at TIMESTAMPTZ`).catch(()=>{});
     await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS forwarded_by TEXT`).catch(()=>{});
+    // Which way it came in. 'studio' means the person addressed it to their own
+    // studio and it went straight there — it is here to be seen, not answered,
+    // so it must not sit in the queue looking like work.
+    await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS destination TEXT DEFAULT 'kronara'`).catch(()=>{});
+    // A studio-bound ticket that has gone quiet. Set by the spawn's nightly
+    // sweep, cleared when someone here has looked — this is what replaces
+    // reading every studio's queue to check they are keeping up.
+    await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS stale_at TIMESTAMPTZ`).catch(()=>{});
     // Push, per device. Support is answered only here now, so “I did not see
     // it” is a real failure. endpoint is UNIQUE so re-subscribing the same
     // browser updates its row instead of doubling every notification.
@@ -309,17 +317,22 @@ app.get('/api/auth/me', requireAdmin, (req, res) => {
 app.post('/api/hooks/ticket', requireApiKey, async (req, res) => {
   try {
     const { externalId, tenantId, fromEmail, fromName, type, subject, body, spawn, spawnName, callbackUrl,
-            aiSessionId, imageUrl, pageContext } = req.body;
+            aiSessionId, imageUrl, pageContext, destination } = req.body;
     if (!fromEmail || !body) return res.json({ ok: false, reason: 'fromEmail and body required' });
+
+    // An older spawn sends no destination at all. Treating that as ours is the
+    // safe reading — it is what every ticket meant before this existed, and the
+    // alternative silently files a studio's traffic as already handled.
+    const dest = destination === 'studio' ? 'studio' : 'kronara';
 
     const ticketId = uuidv4();
     await pool.query(
       `INSERT INTO tickets (id, app_id, external_id, tenant_id, from_email, from_name, type, subject, spawn, spawn_name, callback_url,
-                            ai_session_id, image_url, page_context)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+                            ai_session_id, image_url, page_context, destination)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
       [ticketId, req.app.id, externalId || null, tenantId || null,
        fromEmail, fromName || null, type || 'message', subject || '(no subject)', spawn || null, spawnName || null, callbackUrl || null,
-       aiSessionId || null, imageUrl || null, JSON.stringify(pageContext || {})]
+       aiSessionId || null, imageUrl || null, JSON.stringify(pageContext || {}), dest]
     );
 
     await pool.query(
@@ -327,6 +340,18 @@ app.post('/api/hooks/ticket', requireApiKey, async (req, res) => {
        VALUES ($1,'user',$2,$3,$4,'app')`,
       [ticketId, fromName || fromEmail, fromEmail, body]
     );
+
+    // A studio-bound ticket is recorded and visible here, and deliberately
+    // silent.
+    //
+    // It is somebody else's to answer, and it already notified them on their
+    // own spawn. Pushing it here too would put every studio's own business on
+    // one phone — which is the bottleneck this routing removed, rebuilt as a
+    // notification stream. What DOES get pushed is one of these going
+    // unanswered; see /api/hooks/ticketStale.
+    if (dest === 'studio') {
+      return res.json({ ok: true, ticketId, silent: true });
+    }
 
     // Push first: it is the one that arrives while you are away from an inbox,
     // and it is what makes answering support only here safe — nothing gets
@@ -464,8 +489,16 @@ app.post('/api/hooks/ticketPassBack', requireApiKey, async (req, res) => {
     if (!q.rows.length) return res.json({ ok: false, reason: 'Ticket not found' });
     const t = q.rows[0];
 
+    // destination goes back to ours alongside forwarded_at. A ticket the person
+    // addressed to their studio directly arrives here with forwarded_at already
+    // NULL, so clearing only that would hand it back and still file it under
+    // "with a studio" — visible, and in the one section nobody treats as work.
+    // stale_at clears too: it is ours now, and it is not going quiet on anyone.
     await pool.query(
-      `UPDATE tickets SET forwarded_at=NULL, forwarded_by=NULL, status='open', updated_at=NOW() WHERE id=$1`,
+      `UPDATE tickets
+          SET forwarded_at=NULL, forwarded_by=NULL, destination='kronara',
+              stale_at=NULL, status='open', updated_at=NOW()
+        WHERE id=$1`,
       [t.id]
     );
     await pool.query(
@@ -501,6 +534,74 @@ app.post('/api/hooks/ticketPassBack', requireApiKey, async (req, res) => {
   } catch (e) {
     console.error('[hooks/ticketPassBack]', e.message);
     res.json({ ok: false, reason: e.message });
+  }
+});
+
+// ── A studio has not answered one of its own tickets ───────────────────────
+//
+// Letting people send a request straight to their studio takes one person out
+// of the middle of every question. It also gives up the guarantee that made
+// central routing worth it: that somebody definitely saw it. A studio that
+// stops reading its queue now fails silently, and the person waits.
+//
+// This is where that guarantee comes back, and the shape of it is the point:
+// not "read every studio's queue to check they are keeping up" — which is the
+// same bottleneck, just moved — but "be told when one goes quiet". The ticket
+// stays theirs; it is only surfaced here so somebody can chase it or take it.
+//
+// The spawn decides what counts as quiet and calls this once per ticket.
+app.post('/api/hooks/ticketStale', requireApiKey, async (req, res) => {
+  try {
+    const { externalId, days, spawn, spawnName, subject, fromName } = req.body || {};
+    if (!externalId) return res.json({ ok: false, reason: 'Missing externalId' });
+
+    const q = await pool.query(
+      `SELECT t.*, a.name AS app_name FROM tickets t LEFT JOIN apps a ON a.id=t.app_id
+        WHERE t.external_id=$1 AND t.app_id=$2`, [externalId, req.app.id]);
+    if (!q.rows.length) return res.json({ ok: false, reason: 'Ticket not found' });
+    const t = q.rows[0];
+
+    // Already flagged, or someone here already pulled it back. Answering ok
+    // either way keeps the spawn from retrying it every night.
+    if (t.stale_at || t.destination !== 'studio') {
+      return res.json({ ok: true, alreadyFlagged: true });
+    }
+
+    await pool.query(`UPDATE tickets SET stale_at=NOW(), updated_at=NOW() WHERE id=$1`, [t.id]);
+    await pool.query(
+      `INSERT INTO ticket_messages (ticket_id, sender_type, sender_name, sender_email, body, source)
+       VALUES ($1,'note','Support','',$2,'dashboard')`,
+      [t.id, 'No reply from the studio after ' + (days || '?') + ' days.']
+    ).catch(() => {});
+
+    res.json({ ok: true });
+
+    const who = spawnName || spawn || t.spawn_name || t.spawn || 'A studio';
+    // Worth interrupting for: somebody has been waiting with nobody on it.
+    pushToAdmins(
+      '⏳ No reply · ' + who,
+      (fromName || t.from_name || t.from_email || 'Someone') + ' has waited ' +
+        (days || 'several') + ' days: ' + (subject || t.subject || 'a support request'),
+      '/', 'ticket'
+    );
+    sendMail({
+      to: process.env.ADMIN_EMAIL,
+      subject: `[${t.app_name || 'Support'}] Unanswered at ${who}: ${subject || t.subject || '(no subject)'}`,
+      html: `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;">
+        <div style="background:#b45309;color:#fff;padding:16px 20px;border-radius:8px 8px 0 0;">
+          <strong>${who}</strong> — a request has gone unanswered
+        </div>
+        <div style="border:1px solid #e5e7eb;border-top:0;padding:20px;border-radius:0 0 8px 8px;">
+          <p><strong>${fromName || t.from_name || t.from_email || 'Someone'}</strong> sent this to their studio
+             ${days ? days + ' days ago' : 'a while ago'} and nobody there has replied.</p>
+          <p><strong>Subject:</strong> ${subject || t.subject || '(none)'}</p>
+          <p>It is still theirs — this is only so it does not sit unnoticed. Chase them, or take it on.</p>
+          <p style="margin-top:16px;"><a href="${process.env.DASHBOARD_URL || ''}" style="display:inline-block;background:#b45309;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;">Open the dashboard</a></p>
+        </div></div>`
+    });
+  } catch (e) {
+    console.error('[hooks/ticketStale]', e);
+    res.json({ ok: false, reason: 'SERVER ERROR: ' + e.message });
   }
 });
 
@@ -618,7 +719,7 @@ app.get('/api/hooks/ticket/:id/messages', requireApiKey, async (req, res) => {
 // List all tickets
 app.get('/api/tickets', requireAdmin, async (req, res) => {
   try {
-    const { status, app: appSlug, type, search } = req.query;
+    const { status, app: appSlug, type, search, queue } = req.query;
 
     let where = [];
     let params = [];
@@ -634,6 +735,20 @@ app.get('/api/tickets', requireAdmin, async (req, res) => {
     } else if (status && status !== 'all') {
       where.push(`t.status=$${idx++}`);
       params.push(status);
+    }
+    // Whose problem it is, which is a different question from its status.
+    //
+    // 'mine'   — actually mine to answer: not passed down, not a studio's own.
+    //            A studio ticket that has gone quiet joins this, because
+    //            chasing it IS mine even though answering it is not.
+    // 'studio' — with a studio, however it got there. Passed down by me and
+    //            addressed to them directly are deliberately one section: how
+    //            it arrived matters far less than whose turn it is.
+    if (queue === 'mine') {
+      where.push(`t.forwarded_at IS NULL
+                  AND (t.destination IS DISTINCT FROM 'studio' OR t.stale_at IS NOT NULL)`);
+    } else if (queue === 'studio') {
+      where.push(`(t.forwarded_at IS NOT NULL OR t.destination='studio')`);
     }
     if (appSlug && appSlug !== 'all') {
       where.push(`a.slug=$${idx++}`);
@@ -1103,7 +1218,18 @@ app.get('/api/stats', requireAdmin, async (req, res) => {
         COUNT(*) FILTER (WHERE status='resolved') as resolved_count,
         COUNT(*) FILTER (WHERE status='closed') as closed_count,
         COUNT(*) as total_count,
-        COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours') as today_count
+        COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours') as today_count,
+        -- Live and with a studio, by either route in. Not a to-do list: it is
+        -- here so the volume being handled elsewhere is visible rather than
+        -- invisible, which is the whole reason these still come through.
+        COUNT(*) FILTER (
+          WHERE status IN ('open','in_progress')
+            AND (forwarded_at IS NOT NULL OR destination='studio')
+        ) as with_studio_count,
+        -- The subset that has gone quiet. This one IS a to-do list.
+        COUNT(*) FILTER (
+          WHERE status IN ('open','in_progress') AND stale_at IS NOT NULL
+        ) as stale_count
       FROM tickets
     `);
 
