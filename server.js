@@ -259,6 +259,12 @@ async function initDB() {
     // dead end.
     await client.query(`ALTER TABLE feature_requests ADD COLUMN IF NOT EXISTS notified BOOLEAN DEFAULT FALSE`).catch(()=>{});
     await client.query(`ALTER TABLE feature_requests ADD COLUMN IF NOT EXISTS notify_error TEXT`).catch(()=>{});
+    // The timeline typed into the move form only ever existed as a request
+    // body -- dev_tracker.timeline_note is the only place it landed. A retry
+    // had nothing real to resend and would have quietly sent an empty one.
+    // Copied here at move time so a retry (or an audit of what was actually
+    // communicated) doesn't depend on the dev_tracker card surviving unedited.
+    await client.query(`ALTER TABLE feature_requests ADD COLUMN IF NOT EXISTS timeline_note TEXT DEFAULT ''`).catch(()=>{});
 
     // Dev Tracker — the actual working backlog. A near-exact port of the
     // Kanban that used to live inside Aradia's own admin, moved here because
@@ -1388,8 +1394,8 @@ app.post('/api/requests/:id/move', requireAdmin, async (req, res) => {
 
     const movedAt = new Date().toISOString();
     await pool.query(
-      `UPDATE feature_requests SET status='moved', moved_to=$1, moved_at=$2, moved_by=$3, updated_at=NOW() WHERE id=$4`,
-      [cardId, movedAt, req.admin.name || req.admin.email, fr.id]
+      `UPDATE feature_requests SET status='moved', moved_to=$1, moved_at=$2, moved_by=$3, timeline_note=$5, updated_at=NOW() WHERE id=$4`,
+      [cardId, movedAt, req.admin.name || req.admin.email, fr.id, timelineNote || '']
     );
 
     // Tell the spawn, and actually find out whether it heard -- AWAITED, with

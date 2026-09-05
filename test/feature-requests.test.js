@@ -53,6 +53,9 @@ const ok = (c, label, detail) => {
     ok(new RegExp("\\b" + f + "\\b").test(hook), "callback payload includes " + f));
   ok(/fr\.callback_url/.test(hook) && /fr\.app_api_key/.test(hook),
      "the callback uses the REQUEST's own callback_url + key (per-row, like the ticket reply callback) -- not a hardcoded spawn");
+  ok(/timeline_note=\$5/.test(hook) || /SET status='moved'[^`]*timeline_note=/.test(hook),
+     "the timeline typed into the move form is persisted on the intake row, not left living only in the request body -- " +
+     "a retry (or an audit later) would otherwise have nothing real to resend and would send an empty one");
 }
 
 // ── The callback's outcome is real, not assumed ───────────────────────
