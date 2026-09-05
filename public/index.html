@@ -1167,6 +1167,7 @@ function renderRequestList(requests) {
       <div class="meta">
         <span>${esc(req.from_name || req.from_email)}</span>
         <span class="status-badge status-${req.status === 'moved' ? 'resolved' : 'open'}">${req.status === 'moved' ? 'moved' : 'new'}</span>
+        ${req.status === 'moved' && !req.notified ? `<span title="${esc(req.notify_error||'')}" style="display:inline-block;background:#fef3c7;color:#92400e;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700;white-space:nowrap;">⚠ Not told</span>` : ''}
         <span>${timeAgo(req.created_at)}</span>
       </div>
     </div>
@@ -1194,6 +1195,15 @@ function openRequest(id) {
         <p style="color:var(--success);font-size:13px;font-weight:600;">
           ✓ Moved to Dev Tracker ${timeAgo(req.moved_at)} by ${esc(req.moved_by || '')}
         </p>
+        ${req.notified ? `
+          <p style="color:var(--success);font-size:13px;">✓ The studio was told.</p>
+        ` : `
+          <div style="background:#fef3c7;border-radius:8px;padding:10px 14px;margin-top:8px;">
+            <p style="color:#92400e;font-size:13px;font-weight:600;margin:0 0 4px;">⚠ The studio was NOT told</p>
+            <p style="color:#92400e;font-size:12px;margin:0 0 8px;">${esc(req.notify_error || 'Unknown error.')}</p>
+            <button class="btn" onclick="retryNotify('${req.id}')" id="retryBtn_${req.id}">Retry</button>
+          </div>
+        `}
       ` : `
         <div style="border-top:1px solid var(--border);padding-top:14px;margin-top:6px;">
           <div style="font-weight:700;font-size:13px;margin-bottom:10px;">Move to Dev Tracker</div>
@@ -1237,14 +1247,31 @@ async function submitMove(id) {
   msgEl.textContent = 'Moving…';
   const r = await api('POST', '/api/requests/' + id + '/move', { category, priority, assignedTo, timelineNote });
   if (r.ok) {
-    msgEl.style.color = 'var(--success)';
-    msgEl.textContent = r.notified ? 'Moved — the studio has been told.' : 'Moved (could not reach the spawn to notify them).';
+    if (r.notified) {
+      msgEl.style.color = 'var(--success)';
+      msgEl.textContent = 'Moved — the studio has been told.';
+    } else {
+      msgEl.style.color = 'var(--danger)';
+      msgEl.textContent = 'Moved, but could NOT reach the studio to tell them (' + (r.notifyError || 'unknown error') + '). You can retry from this request.';
+    }
     loadRequests();
     loadDashboard();
     setTimeout(() => openRequestAfterMove(id), 600);
   } else {
     msgEl.style.color = 'var(--danger)';
     msgEl.textContent = r.reason || 'Failed.';
+  }
+}
+
+async function retryNotify(id) {
+  const btn = document.getElementById('retryBtn_' + id);
+  if (btn) { btn.disabled = true; btn.textContent = 'Retrying…'; }
+  const r = await api('POST', '/api/requests/' + id + '/retry-notify');
+  if (r.ok) {
+    await openRequestAfterMove(id);
+  } else {
+    if (btn) { btn.disabled = false; btn.textContent = 'Retry'; }
+    alert(r.reason || 'Retry failed.');
   }
 }
 

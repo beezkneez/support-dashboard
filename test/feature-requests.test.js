@@ -55,6 +55,40 @@ const ok = (c, label, detail) => {
      "the callback uses the REQUEST's own callback_url + key (per-row, like the ticket reply callback) -- not a hardcoded spawn");
 }
 
+// ── The callback's outcome is real, not assumed ───────────────────────
+// A production move reported "the studio has been told" while the callback
+// was still fire-and-forget and unchecked -- the fetch never actually
+// reached the spawn (or the response was never inspected), the intake row
+// showed 'moved' regardless, and there was no way to tell or retry. These
+// pin the fix: the callback is awaited, its HTTP status and body are
+// checked, and the real outcome -- not merely "we had enough to try with"
+// -- is what gets persisted and returned.
+{
+  const fn = server.slice(server.indexOf("async function notifySpawn"), server.indexOf("async function notifySpawn") + 2000);
+  ok(/await fetch\(/.test(fn), "the callback to the spawn is awaited, not fire-and-forget");
+  ok(/AbortSignal\.timeout\(/.test(fn), "the awaited callback has a timeout, so a hung spawn can't hang the admin action");
+  ok(/if \(!resp\.ok\)/.test(fn), "checks the HTTP status, not just whether fetch() threw");
+  ok(/body\.ok !== true/.test(fn), "checks the response BODY says ok, not only the HTTP status");
+  ok(/return \{ notified: true, notifyError: null \}/.test(fn), "returns the real outcome for the caller to persist");
+
+  const move = server.slice(server.indexOf("app.post('/api/requests/:id/move'"), server.indexOf("app.get('/api/dev-tracker'"));
+  ok(/await notifySpawn\(/.test(move), "the move handler awaits the real outcome before responding");
+  ok(/UPDATE feature_requests SET notified=\$1, notify_error=\$2/.test(move),
+     "persists the real outcome, so it survives past this one response and can be shown/retried later");
+  ok(/notified: notified,|notified,/.test(move) && !/notified: willCallback/.test(server),
+     "the client-facing 'notified' field is the awaited result, not the old precondition-only willCallback");
+}
+
+// ── Retrying a failed notification ────────────────────────────────────
+{
+  const i = server.indexOf("app.post('/api/requests/:id/retry-notify'");
+  ok(i >= 0, "found the retry-notify endpoint");
+  ok(/requireAdmin/.test(server.slice(i, i + 60)), "retry-notify requires an authenticated admin");
+  const hook = server.slice(i, server.indexOf("async function notifySpawn"));
+  ok(/status !== 'moved'/.test(hook), "refuses to retry a request that was never actually moved");
+  ok(/await notifySpawn\(/.test(hook), "retry reuses the same real-outcome check as the original move");
+}
+
 // ── An already-moved request can't be moved twice ─────────────────────
 {
   const i = server.indexOf("app.post('/api/requests/:id/move'");

@@ -250,6 +250,15 @@ async function initDB() {
       )
     `).catch(()=>{});
     await client.query(`CREATE INDEX IF NOT EXISTS idx_feature_requests_status ON feature_requests (status, created_at DESC)`).catch(()=>{});
+    // Whether the spawn was actually told, not just whether we tried. The
+    // move used to fire the callback unawaited and report "notified" purely
+    // from having a callback_url/key/external_id to try with -- a real
+    // request moved, updated here, and the studio never heard, with nothing
+    // in the UI or logs to say so. `notify_error` is the last failure reason,
+    // shown next to a Retry action so a spawn that was briefly down isn't a
+    // dead end.
+    await client.query(`ALTER TABLE feature_requests ADD COLUMN IF NOT EXISTS notified BOOLEAN DEFAULT FALSE`).catch(()=>{});
+    await client.query(`ALTER TABLE feature_requests ADD COLUMN IF NOT EXISTS notify_error TEXT`).catch(()=>{});
 
     // Dev Tracker — the actual working backlog. A near-exact port of the
     // Kanban that used to live inside Aradia's own admin, moved here because
@@ -1383,24 +1392,74 @@ app.post('/api/requests/:id/move', requireAdmin, async (req, res) => {
       [cardId, movedAt, req.admin.name || req.admin.email, fr.id]
     );
 
-    // Tell the spawn — same "per-row callback, never block the admin action on
-    // it" shape as the ticket reply callback above. externalId is the id of
-    // the row on the SPAWN's own feature_requests table, not this one.
-    const willCallback = !!(fr.callback_url && fr.external_id && fr.app_api_key);
-    if (willCallback) {
-      fetch(fr.callback_url.replace(/\/$/, '') + '/api/hooks/featureRequestUpdate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-API-Key': fr.app_api_key },
-        body: JSON.stringify({ externalId: fr.external_id, status: 'moved', movedAt, timelineNote: timelineNote || '' })
-      }).catch(err => console.error('[requests/move→app callback]', err.message));
-    }
+    // Tell the spawn, and actually find out whether it heard -- AWAITED, with
+    // a timeout, checking the response status. This used to fire-and-forget:
+    // the admin action reported "the studio has been told" the instant a
+    // callback_url/key/external_id existed to try with, regardless of whether
+    // the request went anywhere or came back an error. A staff member's
+    // request sat "moved" here and "submitted" on their own app with nothing
+    // anywhere to say the notification never landed.
+    const { notified, notifyError } = await notifySpawn(fr, movedAt, timelineNote);
+    await pool.query(`UPDATE feature_requests SET notified=$1, notify_error=$2 WHERE id=$3`, [notified, notifyError, fr.id]);
 
-    res.json({ ok: true, cardId, notified: willCallback });
+    res.json({ ok: true, cardId, notified, notifyError: notified ? null : notifyError });
   } catch(e) {
     console.error('[requests/move]', e);
     res.json({ ok: false, reason: 'Server error' });
   }
 });
+
+// Try again after a failed (or never-attempted) notification. Does not touch
+// dev_tracker or re-run the move -- the card already exists; this only
+// retries telling the spawn.
+app.post('/api/requests/:id/retry-notify', requireAdmin, async (req, res) => {
+  try {
+    const fr = (await pool.query(
+      `SELECT fr.*, a.api_key AS app_api_key FROM feature_requests fr LEFT JOIN apps a ON a.id = fr.app_id WHERE fr.id=$1`,
+      [req.params.id]
+    )).rows[0];
+    if (!fr) return res.json({ ok: false, reason: 'Not found' });
+    if (fr.status !== 'moved') return res.json({ ok: false, reason: 'This request has not been moved yet.' });
+
+    const { notified, notifyError } = await notifySpawn(fr, fr.moved_at ? fr.moved_at.toISOString() : new Date().toISOString(), fr.timeline_note);
+    await pool.query(`UPDATE feature_requests SET notified=$1, notify_error=$2 WHERE id=$3`, [notified, notifyError, fr.id]);
+    res.json({ ok: true, notified, notifyError: notified ? null : notifyError });
+  } catch(e) {
+    console.error('[requests/retry-notify]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+// Shared by /move and /retry-notify. Returns what actually happened, not
+// what we hoped would happen -- callers persist this rather than inferring
+// success from "we had enough to try with".
+async function notifySpawn(fr, movedAt, timelineNote) {
+  if (!fr.callback_url || !fr.external_id || !fr.app_api_key) {
+    return { notified: false, notifyError: 'Missing callback_url, external_id, or app_api_key on this request.' };
+  }
+  try {
+    const resp = await fetch(fr.callback_url.replace(/\/$/, '') + '/api/hooks/featureRequestUpdate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': fr.app_api_key },
+      body: JSON.stringify({ externalId: fr.external_id, status: 'moved', movedAt, timelineNote: timelineNote || '' }),
+      signal: AbortSignal.timeout(10000),
+    });
+    const text = await resp.text().catch(() => '');
+    if (!resp.ok) {
+      console.error(`[requests/notifySpawn] ${fr.callback_url} responded ${resp.status}: ${text.slice(0,300)}`);
+      return { notified: false, notifyError: `Spawn returned HTTP ${resp.status}` };
+    }
+    let body; try { body = JSON.parse(text); } catch(_) { body = null; }
+    if (!body || body.ok !== true) {
+      console.error(`[requests/notifySpawn] ${fr.callback_url} returned non-ok body: ${text.slice(0,300)}`);
+      return { notified: false, notifyError: 'Spawn accepted the call but reported failure.' };
+    }
+    return { notified: true, notifyError: null };
+  } catch(err) {
+    console.error('[requests/notifySpawn]', fr.callback_url, err.message);
+    return { notified: false, notifyError: err.message || 'Network error reaching the spawn.' };
+  }
+}
 
 app.get('/api/dev-tracker', requireAdmin, async (req, res) => {
   try {
