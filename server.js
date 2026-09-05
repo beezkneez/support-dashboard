@@ -212,12 +212,67 @@ async function initDB() {
     await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS push_new_ticket BOOLEAN DEFAULT TRUE`).catch(()=>{});
     await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS push_user_reply BOOLEAN DEFAULT TRUE`).catch(()=>{});
     await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS email_new_ticket BOOLEAN DEFAULT TRUE`).catch(()=>{});
+    await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS push_new_feature_request BOOLEAN DEFAULT TRUE`).catch(()=>{});
     await client.query(`ALTER TABLE apps ADD COLUMN IF NOT EXISTS callback_url TEXT`).catch(()=>{});
     // Auto-configure the Aradia Time reply-back URL (only if not already set).
     await client.query(
       `UPDATE apps SET callback_url=$1 WHERE slug='aradia-time' AND (callback_url IS NULL OR callback_url='')`,
       [process.env.ARADIA_CALLBACK_URL || 'https://aradiafitness.app']
     ).catch(()=>{});
+
+    // ── Feature requests ──────────────────────────────────────────────
+    // A staff member on any spawn submits one of these from their own app.
+    // It lands here as raw intake (status 'new'); reviewing it means giving
+    // it a category/priority/assignee/timeline and moving it onto dev_tracker,
+    // which is the actual working backlog. Shaped exactly like `tickets`:
+    // spawn/spawn_name/callback_url travel on the ROW (set from the submit
+    // call), not looked up through `apps` or `tenants`, so a brand-new spawn
+    // works with zero dashboard-side configuration — same reasoning as
+    // tickets.callback_url above.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS feature_requests (
+        id            TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+        app_id        INTEGER REFERENCES apps(id) ON DELETE SET NULL,
+        external_id   TEXT,
+        spawn         TEXT,
+        spawn_name    TEXT,
+        callback_url  TEXT,
+        from_email    TEXT NOT NULL,
+        from_name     TEXT,
+        title         TEXT NOT NULL,
+        description   TEXT DEFAULT '',
+        status        TEXT DEFAULT 'new',
+        moved_to      TEXT,
+        moved_at      TIMESTAMPTZ,
+        moved_by      TEXT,
+        created_at    TIMESTAMPTZ DEFAULT NOW(),
+        updated_at    TIMESTAMPTZ DEFAULT NOW()
+      )
+    `).catch(()=>{});
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_feature_requests_status ON feature_requests (status, created_at DESC)`).catch(()=>{});
+
+    // Dev Tracker — the actual working backlog. A near-exact port of the
+    // Kanban that used to live inside Aradia's own admin, moved here because
+    // every spawn feeds it, not just Aradia. `source_request_id` links a card
+    // back to the intake row so "who asked for this" and "when did we tell
+    // them" survive past the move; it is nullable because Jud can also add a
+    // card directly, with nothing behind it to notify.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS dev_tracker (
+        id                TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+        source_request_id TEXT REFERENCES feature_requests(id) ON DELETE SET NULL,
+        title             TEXT NOT NULL,
+        description       TEXT DEFAULT '',
+        status            TEXT DEFAULT 'backlog',
+        priority          TEXT DEFAULT 'normal',
+        category          TEXT DEFAULT '',
+        assigned_to       TEXT DEFAULT '',
+        timeline_note     TEXT DEFAULT '',
+        completed_at      TIMESTAMPTZ,
+        completed_by      TEXT DEFAULT '',
+        created_at        TIMESTAMPTZ DEFAULT NOW()
+      )
+    `).catch(()=>{});
 
     // Seed default admin if not exists
     if (process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD) {
@@ -390,6 +445,35 @@ app.post('/api/hooks/ticket', requireApiKey, async (req, res) => {
     res.json({ ok: true, ticketId });
   } catch(e) {
     console.error('[hooks/ticket]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+// A spawn's staff member submits a feature request — same shape and the same
+// silent-success contract as /api/hooks/ticket: this never blocks the
+// submitting app on whether the dashboard could reach a database.
+app.post('/api/hooks/featureRequest', requireApiKey, async (req, res) => {
+  try {
+    const { externalId, fromEmail, fromName, title, description, spawn, spawnName, callbackUrl } = req.body;
+    if (!fromEmail || !title) return res.json({ ok: false, reason: 'fromEmail and title required' });
+
+    const id = uuidv4();
+    await pool.query(
+      `INSERT INTO feature_requests (id, app_id, external_id, spawn, spawn_name, callback_url, from_email, from_name, title, description)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [id, req.app.id, externalId || null, spawn || null, spawnName || null, callbackUrl || null,
+       fromEmail, fromName || null, title, description || '']
+    );
+
+    pushToAdmins(
+      '💡 Feature request · ' + (spawnName || spawn || req.app.name),
+      (fromName || fromEmail) + ': ' + title,
+      '/', 'feature_request'
+    );
+
+    res.json({ ok: true, requestId: id });
+  } catch(e) {
+    console.error('[hooks/featureRequest]', e);
     res.json({ ok: false, reason: 'Server error' });
   }
 });
@@ -942,7 +1026,7 @@ async function pushToAdmins(title, body, url, category) {
   try {
     // Preference is per admin, per category. An admin with push off for a
     // category simply has no rows returned for it.
-    const col = { ticket: 'push_new_ticket', reply: 'push_user_reply' }[category] || null;
+    const col = { ticket: 'push_new_ticket', reply: 'push_user_reply', feature_request: 'push_new_feature_request' }[category] || null;
     const q = col
       ? `SELECT s.* FROM push_subscriptions s
            JOIN admin_users a ON a.id = s.admin_id
@@ -1240,9 +1324,142 @@ app.get('/api/stats', requireAdmin, async (req, res) => {
       GROUP BY a.id ORDER BY a.name
     `);
 
+    const newRequests = await pool.query(`SELECT COUNT(*) AS c FROM feature_requests WHERE status='new'`);
+    stats.rows[0].new_requests_count = newRequests.rows[0].c;
+
     res.json({ ok: true, stats: stats.rows[0], byApp: byApp.rows });
   } catch(e) {
     console.error('[stats]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+// ── Feature Requests (intake) + Dev Tracker (working backlog) ────────
+app.get('/api/requests', requireAdmin, async (req, res) => {
+  try {
+    const status = req.query.status || 'new';
+    const params = [];
+    let where = '1=1';
+    if (status !== 'all') { params.push(status); where = `fr.status = $${params.length}`; }
+    const result = await pool.query(
+      `SELECT fr.*, a.name AS app_name, a.color AS app_color
+       FROM feature_requests fr LEFT JOIN apps a ON a.id = fr.app_id
+       WHERE ${where} ORDER BY fr.created_at DESC LIMIT 200`,
+      params
+    );
+    res.json({ ok: true, requests: result.rows });
+  } catch(e) {
+    console.error('[requests]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+// Move an intake request onto the working backlog. This is the one action
+// that both creates the dev_tracker card AND tells the submitting spawn —
+// everything else about a card (editing priority later, marking it done)
+// happens on the dev_tracker endpoints below and never touches the spawn.
+app.post('/api/requests/:id/move', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { category, priority, assignedTo, timelineNote } = req.body || {};
+
+    const fr = (await pool.query(
+      `SELECT fr.*, a.api_key AS app_api_key FROM feature_requests fr LEFT JOIN apps a ON a.id = fr.app_id WHERE fr.id=$1`,
+      [id]
+    )).rows[0];
+    if (!fr) return res.json({ ok: false, reason: 'Not found' });
+    if (fr.status === 'moved') return res.json({ ok: false, reason: 'Already moved.' });
+
+    const cardId = uuidv4();
+    await pool.query(
+      `INSERT INTO dev_tracker (id, source_request_id, title, description, priority, category, assigned_to, timeline_note)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [cardId, fr.id, fr.title, fr.description || '', priority || 'normal', category || '', assignedTo || '', timelineNote || '']
+    );
+
+    const movedAt = new Date().toISOString();
+    await pool.query(
+      `UPDATE feature_requests SET status='moved', moved_to=$1, moved_at=$2, moved_by=$3, updated_at=NOW() WHERE id=$4`,
+      [cardId, movedAt, req.admin.name || req.admin.email, fr.id]
+    );
+
+    // Tell the spawn — same "per-row callback, never block the admin action on
+    // it" shape as the ticket reply callback above. externalId is the id of
+    // the row on the SPAWN's own feature_requests table, not this one.
+    const willCallback = !!(fr.callback_url && fr.external_id && fr.app_api_key);
+    if (willCallback) {
+      fetch(fr.callback_url.replace(/\/$/, '') + '/api/hooks/featureRequestUpdate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': fr.app_api_key },
+        body: JSON.stringify({ externalId: fr.external_id, status: 'moved', movedAt, timelineNote: timelineNote || '' })
+      }).catch(err => console.error('[requests/move→app callback]', err.message));
+    }
+
+    res.json({ ok: true, cardId, notified: willCallback });
+  } catch(e) {
+    console.error('[requests/move]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+app.get('/api/dev-tracker', requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT dt.*, fr.spawn, fr.spawn_name, fr.from_email, fr.from_name
+       FROM dev_tracker dt LEFT JOIN feature_requests fr ON fr.id = dt.source_request_id
+       ORDER BY CASE WHEN dt.status='backlog' THEN 0 ELSE 1 END,
+                CASE dt.priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 WHEN 'low' THEN 2 ELSE 1 END,
+                dt.created_at DESC`
+    );
+    res.json({ ok: true, items: result.rows });
+  } catch(e) {
+    console.error('[dev-tracker]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+app.post('/api/dev-tracker', requireAdmin, async (req, res) => {
+  try {
+    const item = req.body || {};
+    const actorName = req.admin.name || req.admin.email || '';
+    if (item.id) {
+      const sets = [], vals = [];
+      let idx = 1;
+      const set = (col, val) => { sets.push(`${col}=$${idx++}`); vals.push(val); };
+      if (item.title !== undefined) set('title', item.title);
+      if (item.description !== undefined) set('description', item.description);
+      if (item.status !== undefined) set('status', item.status);
+      if (item.priority !== undefined) set('priority', item.priority);
+      if (item.category !== undefined) set('category', item.category);
+      if (item.assignedTo !== undefined) set('assigned_to', item.assignedTo);
+      if (item.timelineNote !== undefined) set('timeline_note', item.timelineNote);
+      if (item.status === 'done') { set('completed_at', new Date().toISOString()); set('completed_by', actorName); }
+      if (item.status === 'backlog') { set('completed_at', null); set('completed_by', ''); }
+      if (sets.length) {
+        vals.push(item.id);
+        await pool.query(`UPDATE dev_tracker SET ${sets.join(',')} WHERE id=$${idx}`, vals);
+      }
+      res.json({ ok: true });
+    } else {
+      if (!item.title) return res.json({ ok: false, reason: 'title required' });
+      await pool.query(
+        `INSERT INTO dev_tracker (title, description, priority, category, assigned_to, timeline_note) VALUES ($1,$2,$3,$4,$5,$6)`,
+        [item.title, item.description || '', item.priority || 'normal', item.category || '', item.assignedTo || '', item.timelineNote || '']
+      );
+      res.json({ ok: true });
+    }
+  } catch(e) {
+    console.error('[dev-tracker save]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+app.delete('/api/dev-tracker/:id', requireAdmin, async (req, res) => {
+  try {
+    await pool.query(`DELETE FROM dev_tracker WHERE id=$1`, [req.params.id]);
+    res.json({ ok: true });
+  } catch(e) {
+    console.error('[dev-tracker delete]', e);
     res.json({ ok: false, reason: 'Server error' });
   }
 });
