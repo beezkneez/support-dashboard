@@ -240,6 +240,15 @@
         Tickets
         <span id="openBadge" class="badge hidden">0</span>
       </a>
+      <a href="#" data-page="requests" onclick="showPage('requests')">
+        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 1l1.6 4.8L14 6l-3.2 3.2L11.6 14 8 11.4 4.4 14l.8-4.8L2 6l4.4-.2z"/></svg>
+        Requests
+        <span id="requestsBadge" class="badge hidden">0</span>
+      </a>
+      <a href="#" data-page="devtracker" onclick="showPage('devtracker')">
+        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="5" height="12" rx="1"/><rect x="9" y="2" width="5" height="7" rx="1"/><rect x="9" y="10.5" width="5" height="3.5" rx="1"/></svg>
+        Dev Tracker
+      </a>
       <a href="#" data-page="tenants" onclick="showPage('tenants')">
         <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h12M2 7h12M2 11h8"/><circle cx="14" cy="11" r="2"/></svg>
         Tenants
@@ -313,6 +322,49 @@
     <div id="pageTicketDetail" class="hidden">
       <div class="back-link" onclick="showPage('tickets')">&#8592; Back to tickets</div>
       <div id="ticketDetail"></div>
+    </div>
+
+    <!-- ── Feature Requests (intake) Page ── -->
+    <div id="pageRequests" class="hidden">
+      <h1 class="page-title">Feature Requests</h1>
+      <div class="filters">
+        <select id="reqFilterStatus" onchange="loadRequests()">
+          <option value="new" selected>New</option>
+          <option value="moved">Moved to Dev Tracker</option>
+          <option value="all">All</option>
+        </select>
+      </div>
+      <div class="card" style="padding:0;overflow:hidden;" id="requestsList"></div>
+    </div>
+
+    <div id="pageRequestDetail" class="hidden">
+      <div class="back-link" onclick="showPage('requests')">&#8592; Back to requests</div>
+      <div id="requestDetail"></div>
+    </div>
+
+    <!-- ── Dev Tracker Page ── -->
+    <div id="pageDevTracker" class="hidden">
+      <h1 class="page-title">Dev Tracker</h1>
+      <div class="card" style="margin-bottom:16px;">
+        <div style="font-weight:700;font-size:13px;margin-bottom:10px;">Add a card directly</div>
+        <div class="filters" style="margin-bottom:8px;">
+          <input type="text" id="dtNewTitle" placeholder="Title" style="flex:1;min-width:200px;">
+          <select id="dtNewPriority"><option value="low">Low</option><option value="normal" selected>Normal</option><option value="high">High</option></select>
+          <input type="text" id="dtNewCategory" placeholder="Category (optional)" style="width:160px;">
+        </div>
+        <textarea id="dtNewDesc" placeholder="Description (optional)" style="width:100%;min-height:50px;margin-bottom:8px;"></textarea>
+        <button class="btn btn-primary" onclick="addDevTrackerCard()">Add to Backlog</button>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+        <div>
+          <div style="font-weight:800;font-size:14px;margin-bottom:8px;">Backlog</div>
+          <div id="dtBacklog"></div>
+        </div>
+        <div>
+          <div style="font-weight:800;font-size:14px;margin-bottom:8px;">Done</div>
+          <div id="dtDone"></div>
+        </div>
+      </div>
     </div>
 
     <!-- ── Settings Page ── -->
@@ -550,7 +602,7 @@ async function doLogout() {
 
 // ── Navigation ─────────────────────────────────────────────────────
 function showPage(page) {
-  ['Dashboard', 'Tickets', 'TicketDetail', 'Tenants', 'Settings'].forEach(p => {
+  ['Dashboard', 'Tickets', 'TicketDetail', 'Requests', 'RequestDetail', 'DevTracker', 'Tenants', 'Settings'].forEach(p => {
     document.getElementById('page' + p).classList.add('hidden');
   });
   document.querySelectorAll('.sidebar nav a').forEach(a => a.classList.remove('active'));
@@ -566,6 +618,17 @@ function showPage(page) {
   } else if (page === 'ticketDetail') {
     document.getElementById('pageTicketDetail').classList.remove('hidden');
     document.querySelector('[data-page=tickets]').classList.add('active');
+  } else if (page === 'requests') {
+    document.getElementById('pageRequests').classList.remove('hidden');
+    document.querySelector('[data-page=requests]').classList.add('active');
+    loadRequests();
+  } else if (page === 'requestDetail') {
+    document.getElementById('pageRequestDetail').classList.remove('hidden');
+    document.querySelector('[data-page=requests]').classList.add('active');
+  } else if (page === 'devtracker') {
+    document.getElementById('pageDevTracker').classList.remove('hidden');
+    document.querySelector('[data-page=devtracker]').classList.add('active');
+    loadDevTracker();
   } else if (page === 'tenants') {
     document.getElementById('pageTenants').classList.remove('hidden');
     document.querySelector('[data-page=tenants]').classList.add('active');
@@ -588,6 +651,11 @@ async function loadDashboard() {
   const openCount = parseInt(s.open_count) || 0;
   if (openCount > 0) { badge.textContent = openCount; badge.classList.remove('hidden'); }
   else { badge.classList.add('hidden'); }
+
+  const reqBadge = document.getElementById('requestsBadge');
+  const newReqCount = parseInt(s.new_requests_count) || 0;
+  if (newReqCount > 0) { reqBadge.textContent = newReqCount; reqBadge.classList.remove('hidden'); }
+  else { reqBadge.classList.add('hidden'); }
 
   // The tiles are the fastest route to a filtered list, so they are buttons.
   // The labels say whose turn it is, because "Open" and "In Progress" do not:
@@ -1071,6 +1139,195 @@ async function deleteTenant() {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────
+// ── Feature Requests (intake) ─────────────────────────────────────────
+let _requestsCache = [];
+
+async function loadRequests() {
+  const status = document.getElementById('reqFilterStatus').value;
+  const r = await api('GET', '/api/requests?status=' + encodeURIComponent(status));
+  if (!r.ok) return;
+  _requestsCache = r.requests;
+  renderRequestList(r.requests);
+}
+
+function renderRequestList(requests) {
+  const el = document.getElementById('requestsList');
+  if (requests.length === 0) {
+    el.innerHTML = '<div class="empty-state"><h3>No requests found</h3><p>Nothing here yet.</p></div>';
+    return;
+  }
+  el.innerHTML = requests.map(req => `
+    <div class="ticket-row" onclick="openRequest('${req.id}')">
+      <span class="app-dot" style="background:${req.app_color || '#6366f1'}" title="${esc(req.app_name || '')}"></span>
+      ${(req.spawn_name || req.spawn) ? `<span style="display:inline-block;background:#eef2ff;color:#4338ca;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700;white-space:nowrap;">🏢 ${esc(req.spawn_name || req.spawn)}</span>` : ''}
+      <div class="subject">
+        ${esc(req.title)}
+        <span class="preview">${esc((req.description || '').substring(0, 60))}</span>
+      </div>
+      <div class="meta">
+        <span>${esc(req.from_name || req.from_email)}</span>
+        <span class="status-badge status-${req.status === 'moved' ? 'resolved' : 'open'}">${req.status === 'moved' ? 'moved' : 'new'}</span>
+        <span>${timeAgo(req.created_at)}</span>
+      </div>
+    </div>
+  `).join('');
+}
+
+function openRequest(id) {
+  const req = _requestsCache.find(r => r.id === id);
+  if (!req) return;
+  showPage('requestDetail');
+  const alreadyMoved = req.status === 'moved';
+  document.getElementById('requestDetail').innerHTML = `
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:10px;">
+        <h2 style="margin:0;">${esc(req.title)}</h2>
+        <span class="status-badge status-${alreadyMoved ? 'resolved' : 'open'}">${alreadyMoved ? 'moved' : 'new'}</span>
+      </div>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:4px;">
+        From ${esc(req.from_name || req.from_email)} (${esc(req.from_email)})
+        ${(req.spawn_name || req.spawn) ? ' · 🏢 ' + esc(req.spawn_name || req.spawn) : ''}
+        · ${timeAgo(req.created_at)}
+      </p>
+      <div style="white-space:pre-wrap;background:var(--bg);border-radius:8px;padding:14px;margin:14px 0;">${esc(req.description || '(no description)')}</div>
+      ${alreadyMoved ? `
+        <p style="color:var(--success);font-size:13px;font-weight:600;">
+          ✓ Moved to Dev Tracker ${timeAgo(req.moved_at)} by ${esc(req.moved_by || '')}
+        </p>
+      ` : `
+        <div style="border-top:1px solid var(--border);padding-top:14px;margin-top:6px;">
+          <div style="font-weight:700;font-size:13px;margin-bottom:10px;">Move to Dev Tracker</div>
+          <div class="filters" style="margin-bottom:8px;">
+            <select id="moveCategory">
+              <option value="">— Category —</option>
+              <option value="Booking">Booking</option>
+              <option value="Edu">Edu</option>
+              <option value="Payroll">Payroll</option>
+              <option value="Scheduling">Scheduling</option>
+              <option value="Contracts">Contracts</option>
+              <option value="Promo / Marketing">Promo / Marketing</option>
+              <option value="Polls">Polls</option>
+              <option value="Chat">Chat</option>
+              <option value="UI / UX">UI / UX</option>
+              <option value="Billing / Stripe">Billing / Stripe</option>
+              <option value="Other">Other</option>
+            </select>
+            <select id="movePriority">
+              <option value="low">Low</option>
+              <option value="normal" selected>Normal</option>
+              <option value="high">High</option>
+            </select>
+            <input type="text" id="moveAssignedTo" placeholder="Assign to (name)" style="width:160px;">
+          </div>
+          <input type="text" id="moveTimeline" placeholder="Approx. timeline (e.g. “next couple weeks”)" style="width:100%;margin-bottom:10px;">
+          <button class="btn btn-primary" onclick="submitMove('${req.id}')">Move to Dev Tracker</button>
+          <span id="moveMsg" style="margin-left:10px;font-size:12px;"></span>
+        </div>
+      `}
+    </div>
+  `;
+}
+
+async function submitMove(id) {
+  const category = document.getElementById('moveCategory').value;
+  const priority = document.getElementById('movePriority').value;
+  const assignedTo = document.getElementById('moveAssignedTo').value.trim();
+  const timelineNote = document.getElementById('moveTimeline').value.trim();
+  const msgEl = document.getElementById('moveMsg');
+  msgEl.textContent = 'Moving…';
+  const r = await api('POST', '/api/requests/' + id + '/move', { category, priority, assignedTo, timelineNote });
+  if (r.ok) {
+    msgEl.style.color = 'var(--success)';
+    msgEl.textContent = r.notified ? 'Moved — the studio has been told.' : 'Moved (could not reach the spawn to notify them).';
+    loadRequests();
+    loadDashboard();
+    setTimeout(() => openRequestAfterMove(id), 600);
+  } else {
+    msgEl.style.color = 'var(--danger)';
+    msgEl.textContent = r.reason || 'Failed.';
+  }
+}
+
+async function openRequestAfterMove(id) {
+  const r = await api('GET', '/api/requests?status=all');
+  if (!r.ok) return;
+  _requestsCache = r.requests;
+  const req = _requestsCache.find(x => x.id === id);
+  if (req) openRequest(id);
+}
+
+// ── Dev Tracker ────────────────────────────────────────────────────
+let _devTrackerCache = [];
+
+async function loadDevTracker() {
+  const r = await api('GET', '/api/dev-tracker');
+  if (!r.ok) return;
+  _devTrackerCache = r.items;
+  renderDevTracker();
+}
+
+function renderDevTracker() {
+  const backlog = _devTrackerCache.filter(i => i.status !== 'done');
+  const done = _devTrackerCache.filter(i => i.status === 'done');
+  document.getElementById('dtBacklog').innerHTML = backlog.length
+    ? backlog.map(renderDevTrackerCard).join('')
+    : '<div class="empty-state" style="padding:20px;"><p>Nothing in the backlog.</p></div>';
+  document.getElementById('dtDone').innerHTML = done.length
+    ? done.map(renderDevTrackerCard).join('')
+    : '<div class="empty-state" style="padding:20px;"><p>Nothing done yet.</p></div>';
+}
+
+function renderDevTrackerCard(item) {
+  const fromSpawn = (item.spawn_name || item.spawn)
+    ? `<span style="display:inline-block;background:#eef2ff;color:#4338ca;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700;margin-right:6px;">🏢 ${esc(item.spawn_name || item.spawn)}</span>`
+    : '';
+  return `
+    <div class="card" style="margin-bottom:10px;">
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;">
+        <div style="font-weight:700;font-size:14px;">${esc(item.title)}</div>
+        <span class="priority-badge priority-${item.priority}">${esc(item.priority)}</span>
+      </div>
+      ${item.description ? `<div style="font-size:13px;color:var(--muted);margin:6px 0;white-space:pre-wrap;">${esc(item.description)}</div>` : ''}
+      <div style="font-size:12px;color:var(--muted);margin:8px 0;">
+        ${fromSpawn}
+        ${item.category ? esc(item.category) + ' · ' : ''}
+        ${item.assigned_to ? '👤 ' + esc(item.assigned_to) : 'Unassigned'}
+        ${item.timeline_note ? ' · ⏱ ' + esc(item.timeline_note) : ''}
+      </div>
+      <div style="display:flex;gap:8px;">
+        ${item.status === 'done'
+          ? `<button class="btn" onclick="toggleDevTrackerStatus('${item.id}','backlog')">↩ Back to backlog</button>`
+          : `<button class="btn btn-primary" onclick="toggleDevTrackerStatus('${item.id}','done')">✓ Mark done</button>`}
+        <button class="btn" onclick="deleteDevTrackerCard('${item.id}')">Delete</button>
+      </div>
+    </div>
+  `;
+}
+
+async function toggleDevTrackerStatus(id, status) {
+  await api('POST', '/api/dev-tracker', { id, status });
+  loadDevTracker();
+}
+
+async function deleteDevTrackerCard(id) {
+  if (!confirm('Delete this card?')) return;
+  await api('DELETE', '/api/dev-tracker/' + id);
+  loadDevTracker();
+}
+
+async function addDevTrackerCard() {
+  const title = document.getElementById('dtNewTitle').value.trim();
+  if (!title) return;
+  const priority = document.getElementById('dtNewPriority').value;
+  const category = document.getElementById('dtNewCategory').value.trim();
+  const description = document.getElementById('dtNewDesc').value.trim();
+  await api('POST', '/api/dev-tracker', { title, priority, category, description });
+  document.getElementById('dtNewTitle').value = '';
+  document.getElementById('dtNewDesc').value = '';
+  document.getElementById('dtNewCategory').value = '';
+  loadDevTracker();
+}
+
 function esc(s) {
   if (!s) return '';
   const d = document.createElement('div');
