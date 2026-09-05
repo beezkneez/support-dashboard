@@ -289,6 +289,46 @@ async function initDB() {
       )
     `).catch(()=>{});
 
+    // ── Changelog ("What's New") — one list per app, broadcast to every spawn ──
+    // Every spawn on the same codebase ships the same underlying changes, so
+    // authoring lives here once instead of duplicated per studio. Scoped by
+    // app_id (not spawn) since content is shared across all of an app's
+    // spawns; app_id keeps "Aradia Time" and any other registered app's
+    // changelogs from leaking into each other. Announcing broadcasts to
+    // every spawn registered under `tenants` for that app -- this is the one
+    // place this differs from feature_requests: that's a 1:1 callback, this
+    // is 1:many.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS changelog_entries (
+        id            TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+        app_id        INTEGER REFERENCES apps(id) ON DELETE CASCADE,
+        version_label TEXT,
+        title         TEXT NOT NULL,
+        body          JSONB DEFAULT '[]',
+        category      TEXT DEFAULT '',
+        audience      TEXT DEFAULT 'all',
+        published     BOOLEAN DEFAULT FALSE,
+        announced_at  TIMESTAMPTZ,
+        created_by    TEXT,
+        created_at    TIMESTAMPTZ DEFAULT NOW(),
+        updated_at    TIMESTAMPTZ DEFAULT NOW()
+      )
+    `).catch(()=>{});
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_changelog_entries_app ON changelog_entries (app_id, published, audience, created_at DESC)`).catch(()=>{});
+    // Read state is per (app, viewer) -- keyed on email, not spawn, since it's
+    // the same person's "have I seen this" regardless of which studio they're
+    // asking from. spawn is kept as a plain column for auditing only.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS changelog_reads (
+        app_id     INTEGER NOT NULL,
+        user_email TEXT NOT NULL,
+        entry_id   TEXT NOT NULL,
+        spawn      TEXT,
+        read_at    TIMESTAMPTZ DEFAULT NOW(),
+        PRIMARY KEY (app_id, user_email, entry_id)
+      )
+    `).catch(()=>{});
+
     // Seed default admin if not exists
     if (process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD) {
       const existing = await client.query('SELECT id FROM admin_users WHERE email=$1', [process.env.ADMIN_EMAIL]);
@@ -489,6 +529,60 @@ app.post('/api/hooks/featureRequest', requireApiKey, async (req, res) => {
     res.json({ ok: true, requestId: id });
   } catch(e) {
     console.error('[hooks/featureRequest]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+// A spawn asking, on a staff member's behalf, what's published for them.
+// `seeAdmin` is the SPAWN's own permission check (changelog_admin) for that
+// viewer -- the dashboard trusts it the same way it trusts `fromEmail`
+// elsewhere, since the spawn already authenticated the person locally before
+// ever calling here. Additive: seeAdmin=true gets audience='all' entries too.
+app.post('/api/hooks/getChangelogEntries', requireApiKey, async (req, res) => {
+  try {
+    const { email, seeAdmin, spawn } = req.body || {};
+    if (!email) return res.json({ ok: false, reason: 'email required' });
+    const params = [req.app.id, email];
+    let audClause = `ce.audience='all'`;
+    if (seeAdmin) audClause = `(ce.audience='all' OR ce.audience='admin')`;
+    const r = await pool.query(
+      `SELECT ce.*, (cr.entry_id IS NOT NULL) AS is_read FROM changelog_entries ce
+       LEFT JOIN changelog_reads cr ON cr.app_id=ce.app_id AND cr.entry_id=ce.id AND LOWER(cr.user_email)=LOWER($2)
+       WHERE ce.app_id=$1 AND ce.published=TRUE AND ${audClause}
+       ORDER BY ce.created_at DESC`,
+      params
+    );
+    res.json({
+      ok: true,
+      entries: r.rows.map(e => ({
+        id: e.id, versionLabel: e.version_label || '', title: e.title,
+        body: Array.isArray(e.body) ? e.body : [], category: e.category || '',
+        audience: e.audience || 'all', announcedAt: e.announced_at,
+        createdAt: e.created_at, read: !!e.is_read,
+      })),
+    });
+  } catch(e) {
+    console.error('[hooks/getChangelogEntries]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+app.post('/api/hooks/markChangelogsRead', requireApiKey, async (req, res) => {
+  try {
+    const { email, seeAdmin, spawn } = req.body || {};
+    if (!email) return res.json({ ok: false, reason: 'email required' });
+    let audClause = `audience='all'`;
+    if (seeAdmin) audClause = `(audience='all' OR audience='admin')`;
+    await pool.query(
+      `INSERT INTO changelog_reads (app_id, user_email, entry_id, spawn)
+       SELECT app_id, LOWER($2), id, $3 FROM changelog_entries
+       WHERE app_id=$1 AND published=TRUE AND ${audClause}
+       ON CONFLICT DO NOTHING`,
+      [req.app.id, email, spawn || null]
+    );
+    res.json({ ok: true });
+  } catch(e) {
+    console.error('[hooks/markChangelogsRead]', e);
     res.json({ ok: false, reason: 'Server error' });
   }
 });
@@ -1525,6 +1619,123 @@ app.delete('/api/dev-tracker/:id', requireAdmin, async (req, res) => {
     res.json({ ok: true });
   } catch(e) {
     console.error('[dev-tracker delete]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+// ── Changelog authoring ("What's New") ────────────────────────────────
+// Everything here is scoped to one app at a time (?appId=), since a changelog
+// is specific to the codebase it describes -- "Aradia Time" and any other
+// registered app never share entries.
+app.get('/api/changelog', requireAdmin, async (req, res) => {
+  try {
+    const appId = parseInt(req.query.appId, 10);
+    if (!appId) return res.json({ ok: false, reason: 'appId required' });
+    const r = await pool.query(`SELECT * FROM changelog_entries WHERE app_id=$1 ORDER BY created_at DESC`, [appId]);
+    res.json({
+      ok: true,
+      entries: r.rows.map(e => ({
+        id: e.id, versionLabel: e.version_label || '', title: e.title,
+        body: Array.isArray(e.body) ? e.body : [], category: e.category || '',
+        audience: e.audience || 'all', published: !!e.published,
+        announcedAt: e.announced_at, createdAt: e.created_at,
+      })),
+    });
+  } catch(e) {
+    console.error('[changelog list]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+app.post('/api/changelog', requireAdmin, async (req, res) => {
+  try {
+    const { id, appId, versionLabel, title, body, category, audience } = req.body || {};
+    if (!title) return res.json({ ok: false, reason: 'title required' });
+    const bodyArr = Array.isArray(body) ? body.map(s => String(s || '').trim()).filter(Boolean)
+      : String(body || '').split('\n').map(s => s.trim()).filter(Boolean);
+    const aud = audience === 'admin' ? 'admin' : 'all';
+    if (id) {
+      await pool.query(
+        `UPDATE changelog_entries SET version_label=$1, title=$2, body=$3, category=$4, audience=$5, updated_at=NOW() WHERE id=$6`,
+        [versionLabel || '', title, JSON.stringify(bodyArr), category || '', aud, id]
+      );
+      return res.json({ ok: true, entryId: id });
+    }
+    if (!appId) return res.json({ ok: false, reason: 'appId required for a new entry' });
+    const newId = uuidv4();
+    await pool.query(
+      `INSERT INTO changelog_entries (id, app_id, version_label, title, body, category, audience, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [newId, appId, versionLabel || '', title, JSON.stringify(bodyArr), category || '', aud, req.admin.name || req.admin.email]
+    );
+    res.json({ ok: true, entryId: newId });
+  } catch(e) {
+    console.error('[changelog save]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+app.post('/api/changelog/:id/publish', requireAdmin, async (req, res) => {
+  try {
+    await pool.query(`UPDATE changelog_entries SET published=TRUE, updated_at=NOW() WHERE id=$1`, [req.params.id]);
+    res.json({ ok: true });
+  } catch(e) {
+    console.error('[changelog publish]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+// Publishes (if not already) and broadcasts to every spawn registered for
+// this entry's app -- one entry, many studios, unlike a feature request's
+// single callback. Each spawn does its OWN local push fan-out on receipt
+// (it has the push subscriptions and preference columns; this dashboard
+// doesn't), so failure to reach one spawn never blocks the others.
+app.post('/api/changelog/:id/announce', requireAdmin, async (req, res) => {
+  try {
+    const entry = (await pool.query(
+      `SELECT ce.*, a.api_key AS app_api_key FROM changelog_entries ce LEFT JOIN apps a ON a.id = ce.app_id WHERE ce.id=$1`,
+      [req.params.id]
+    )).rows[0];
+    if (!entry) return res.json({ ok: false, reason: 'Not found' });
+    await pool.query(`UPDATE changelog_entries SET published=TRUE, announced_at=NOW(), updated_at=NOW() WHERE id=$1`, [entry.id]);
+
+    const spawns = (await pool.query(
+      `SELECT slug, name, base_url FROM tenants WHERE app_id=$1 AND base_url IS NOT NULL AND base_url <> '' AND listed IS NOT FALSE`,
+      [entry.app_id]
+    )).rows;
+
+    let sent = 0, failed = 0;
+    const results = await Promise.allSettled(spawns.map(t =>
+      fetch(t.base_url.replace(/\/$/, '') + '/api/hooks/changelogAnnounce', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': entry.app_api_key },
+        body: JSON.stringify({
+          entryId: entry.id, title: entry.title,
+          body: Array.isArray(entry.body) ? entry.body : [],
+          audience: entry.audience, category: entry.category || '',
+        }),
+        signal: AbortSignal.timeout(10000),
+      }).then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); })
+    ));
+    results.forEach((r, i) => {
+      if (r.status === 'fulfilled') sent++;
+      else { failed++; console.error('[changelog announce]', spawns[i].slug, r.reason && r.reason.message); }
+    });
+
+    res.json({ ok: true, spawnsSent: sent, spawnsFailed: failed, spawnsTotal: spawns.length });
+  } catch(e) {
+    console.error('[changelog announce]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+app.delete('/api/changelog/:id', requireAdmin, async (req, res) => {
+  try {
+    await pool.query(`DELETE FROM changelog_reads WHERE entry_id=$1`, [req.params.id]);
+    await pool.query(`DELETE FROM changelog_entries WHERE id=$1`, [req.params.id]);
+    res.json({ ok: true });
+  } catch(e) {
+    console.error('[changelog delete]', e);
     res.json({ ok: false, reason: 'Server error' });
   }
 });

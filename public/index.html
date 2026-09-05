@@ -249,6 +249,10 @@
         <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="5" height="12" rx="1"/><rect x="9" y="2" width="5" height="7" rx="1"/><rect x="9" y="10.5" width="5" height="3.5" rx="1"/></svg>
         Dev Tracker
       </a>
+      <a href="#" data-page="changelog" onclick="showPage('changelog')">
+        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 2h8v12l-4-2-4 2z"/></svg>
+        Changelog
+      </a>
       <a href="#" data-page="tenants" onclick="showPage('tenants')">
         <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h12M2 7h12M2 11h8"/><circle cx="14" cy="11" r="2"/></svg>
         Tenants
@@ -365,6 +369,33 @@
           <div id="dtDone"></div>
         </div>
       </div>
+    </div>
+
+    <!-- ── Changelog Page ── -->
+    <div id="pageChangelog" class="hidden">
+      <h1 class="page-title">Changelog</h1>
+      <div class="filters" style="margin-bottom:16px;">
+        <select id="clAppSelect" onchange="loadChangelogList_()"></select>
+      </div>
+      <div class="card" style="margin-bottom:16px;">
+        <div style="font-weight:700;font-size:13px;margin-bottom:10px;" id="clEditorTitle">Write an entry</div>
+        <input type="hidden" id="clEditId">
+        <div class="filters" style="margin-bottom:8px;">
+          <input type="text" id="clVersionLabel" placeholder="Version / date label (e.g. Sep 2026)" style="flex:1;min-width:200px;">
+          <input type="text" id="clCategory" placeholder="Category (e.g. Booking, Payroll)" style="width:200px;">
+          <select id="clAudience"><option value="all">All Staff</option><option value="admin">Admin &amp; Mod Only</option></select>
+        </div>
+        <input type="text" id="clTitle" placeholder="Title" style="width:100%;margin-bottom:8px;">
+        <textarea id="clBody" placeholder="What changed -- one bullet per line" style="width:100%;min-height:90px;margin-bottom:8px;"></textarea>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+          <button class="btn btn-primary" onclick="saveChangelogEntry_()">Save Draft</button>
+          <button class="btn" id="clPublishBtn" onclick="publishChangelogEntry_()" style="display:none;">Publish</button>
+          <button class="btn btn-success" id="clAnnounceBtn" onclick="announceChangelogEntry_()" style="display:none;">📢 Announce to every spawn</button>
+          <button class="btn" id="clNewBtn" onclick="resetChangelogEditor_()" style="display:none;">+ New Entry</button>
+          <span id="clStatus" style="font-size:12px;color:var(--muted);"></span>
+        </div>
+      </div>
+      <div id="changelogList" class="card" style="padding:0;overflow:hidden;"></div>
     </div>
 
     <!-- ── Settings Page ── -->
@@ -602,7 +633,7 @@ async function doLogout() {
 
 // ── Navigation ─────────────────────────────────────────────────────
 function showPage(page) {
-  ['Dashboard', 'Tickets', 'TicketDetail', 'Requests', 'RequestDetail', 'DevTracker', 'Tenants', 'Settings'].forEach(p => {
+  ['Dashboard', 'Tickets', 'TicketDetail', 'Requests', 'RequestDetail', 'DevTracker', 'Changelog', 'Tenants', 'Settings'].forEach(p => {
     document.getElementById('page' + p).classList.add('hidden');
   });
   document.querySelectorAll('.sidebar nav a').forEach(a => a.classList.remove('active'));
@@ -629,6 +660,10 @@ function showPage(page) {
     document.getElementById('pageDevTracker').classList.remove('hidden');
     document.querySelector('[data-page=devtracker]').classList.add('active');
     loadDevTracker();
+  } else if (page === 'changelog') {
+    document.getElementById('pageChangelog').classList.remove('hidden');
+    document.querySelector('[data-page=changelog]').classList.add('active');
+    loadChangelogApps_();
   } else if (page === 'tenants') {
     document.getElementById('pageTenants').classList.remove('hidden');
     document.querySelector('[data-page=tenants]').classList.add('active');
@@ -1353,6 +1388,127 @@ async function addDevTrackerCard() {
   document.getElementById('dtNewDesc').value = '';
   document.getElementById('dtNewCategory').value = '';
   loadDevTracker();
+}
+
+// ── Changelog ("What's New") ──────────────────────────────────────────
+let _clEntries = [];
+async function loadChangelogApps_(){
+  if (!STATE.apps) await loadApps();
+  const sel = document.getElementById('clAppSelect');
+  const prev = sel.value;
+  sel.innerHTML = (STATE.apps || []).map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('');
+  if (prev && (STATE.apps || []).some(a => String(a.id) === prev)) sel.value = prev;
+  loadChangelogList_();
+}
+async function loadChangelogList_(){
+  const appId = document.getElementById('clAppSelect').value;
+  if (!appId) { document.getElementById('changelogList').innerHTML = ''; return; }
+  const r = await api('GET', '/api/changelog?appId=' + encodeURIComponent(appId));
+  if (!r.ok) return;
+  _clEntries = r.entries;
+  renderChangelogList_();
+}
+function renderChangelogList_(){
+  const el = document.getElementById('changelogList');
+  if (!_clEntries.length) { el.innerHTML = '<div class="empty-state"><h3>No entries yet</h3><p>Write one above.</p></div>'; return; }
+  el.innerHTML = _clEntries.map(e => {
+    const status = e.announcedAt ? '📢 Announced' : e.published ? 'Published' : 'Draft';
+    const statusColor = e.announcedAt ? 'var(--success)' : e.published ? 'var(--info)' : 'var(--muted)';
+    return `
+    <div class="ticket-row" onclick="editChangelogEntry_('${e.id}')">
+      <span class="type-badge" style="background:${statusColor};color:#fff;">${status}</span>
+      ${e.audience === 'admin' ? '<span style="background:#6b7280;color:#fff;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700;">🔧 Admin</span>' : ''}
+      <div class="subject">
+        ${esc(e.title)}
+        <span class="preview">${esc((e.body||[]).join(' · ').slice(0,80))}</span>
+      </div>
+      <div class="meta">
+        <span>${esc(e.versionLabel || '')}</span>
+        <span>${timeAgo(e.createdAt)}</span>
+        <button class="btn" style="font-size:11px;padding:4px 10px;" onclick="event.stopPropagation();deleteChangelogEntry_('${e.id}')">Delete</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+function editChangelogEntry_(id){
+  const e = _clEntries.find(x => x.id === id);
+  if (!e) return;
+  document.getElementById('clEditId').value = e.id;
+  document.getElementById('clVersionLabel').value = e.versionLabel || '';
+  document.getElementById('clTitle').value = e.title || '';
+  document.getElementById('clBody').value = (e.body || []).join('\n');
+  document.getElementById('clCategory').value = e.category || '';
+  document.getElementById('clAudience').value = e.audience || 'all';
+  document.getElementById('clEditorTitle').textContent = 'Editing: ' + e.title;
+  document.getElementById('clPublishBtn').style.display = e.published ? 'none' : '';
+  document.getElementById('clAnnounceBtn').style.display = e.announcedAt ? 'none' : '';
+  document.getElementById('clNewBtn').style.display = '';
+  document.getElementById('clStatus').textContent = '';
+}
+function resetChangelogEditor_(){
+  document.getElementById('clEditId').value = '';
+  document.getElementById('clVersionLabel').value = '';
+  document.getElementById('clTitle').value = '';
+  document.getElementById('clBody').value = '';
+  document.getElementById('clCategory').value = '';
+  document.getElementById('clAudience').value = 'all';
+  document.getElementById('clEditorTitle').textContent = 'Write an entry';
+  document.getElementById('clPublishBtn').style.display = 'none';
+  document.getElementById('clAnnounceBtn').style.display = 'none';
+  document.getElementById('clNewBtn').style.display = 'none';
+  document.getElementById('clStatus').textContent = '';
+}
+async function saveChangelogEntry_(){
+  const title = document.getElementById('clTitle').value.trim();
+  const status = document.getElementById('clStatus');
+  if (!title) { status.textContent = 'Title required.'; return; }
+  const id = document.getElementById('clEditId').value || undefined;
+  const appId = document.getElementById('clAppSelect').value;
+  status.textContent = 'Saving…';
+  const r = await api('POST', '/api/changelog', {
+    id, appId, versionLabel: document.getElementById('clVersionLabel').value,
+    title, body: document.getElementById('clBody').value,
+    category: document.getElementById('clCategory').value,
+    audience: document.getElementById('clAudience').value,
+  });
+  if (!r.ok) { status.textContent = r.reason || 'Failed.'; return; }
+  status.textContent = '✓ Saved as draft.';
+  document.getElementById('clEditId').value = r.entryId;
+  document.getElementById('clPublishBtn').style.display = '';
+  document.getElementById('clNewBtn').style.display = '';
+  loadChangelogList_();
+}
+async function publishChangelogEntry_(){
+  const id = document.getElementById('clEditId').value;
+  if (!id) return;
+  const status = document.getElementById('clStatus');
+  status.textContent = 'Publishing…';
+  const r = await api('POST', '/api/changelog/' + id + '/publish');
+  if (!r.ok) { status.textContent = r.reason || 'Failed.'; return; }
+  status.textContent = '✓ Published — visible on every spawn\'s list page now.';
+  document.getElementById('clPublishBtn').style.display = 'none';
+  document.getElementById('clAnnounceBtn').style.display = '';
+  loadChangelogList_();
+}
+async function announceChangelogEntry_(){
+  const id = document.getElementById('clEditId').value;
+  if (!id) return;
+  const aud = document.getElementById('clAudience').value === 'admin' ? 'Admin and Moderator staff' : 'every staff member';
+  if (!confirm('Announce this to ' + aud + ' across every spawn? This pushes a notification and lights a banner on each one.')) return;
+  const status = document.getElementById('clStatus');
+  status.textContent = 'Announcing…';
+  const r = await api('POST', '/api/changelog/' + id + '/announce');
+  if (!r.ok) { status.textContent = r.reason || 'Failed.'; return; }
+  status.textContent = `✓ Announced — reached ${r.spawnsSent}/${r.spawnsTotal} spawn(s)` + (r.spawnsFailed ? `, ${r.spawnsFailed} failed (see server logs)` : '') + '.';
+  document.getElementById('clPublishBtn').style.display = 'none';
+  document.getElementById('clAnnounceBtn').style.display = 'none';
+  loadChangelogList_();
+}
+async function deleteChangelogEntry_(id){
+  if (!confirm('Delete this changelog entry?')) return;
+  await api('DELETE', '/api/changelog/' + id);
+  resetChangelogEditor_();
+  loadChangelogList_();
 }
 
 function esc(s) {
