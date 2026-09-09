@@ -30,8 +30,8 @@ self.addEventListener('push', e => {
   e.waitUntil(
     self.registration.showNotification(title, {
       body: d.body || 'You have a new support message.',
-      icon: '/icon-192.svg',
-      badge: '/icon-192.svg',
+      icon: '/icon-192.png',
+      badge: '/icon-192.png',
       data: { url: d.url || '/' },
       // Collapses repeats from a burst into one entry rather than a stack of
       // near-identical notifications.
