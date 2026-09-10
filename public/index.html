@@ -169,7 +169,9 @@
   .reply-box .tab:first-child { border-radius: 8px 0 0 8px; }
   .reply-box .tab:last-child { border-radius: 0 8px 8px 0; }
   .reply-box .tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
-  .reply-box .actions { display: flex; gap: 8px; margin-top: 10px; }
+  .reply-box .actions { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+  .reply-shot-preview { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+  .reply-shot-preview img { max-width: 140px; max-height: 100px; border-radius: 8px; border: 1px solid var(--border); }
 
   .back-link { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); margin-bottom: 16px; cursor: pointer; }
   .back-link:hover { color: var(--text); }
@@ -922,16 +924,21 @@ async function openTicket(id) {
     ${koraContextPanel(t)}
 
     <div class="message-thread">
-      ${msgs.map(m => `
+      ${msgs.map(m => {
+        // Only ever render an http(s) or actual image data URL — same rule
+        // koraContextPanel applies to the inbound screenshot.
+        const shot = m.image_url && /^(https?:\/\/|data:image\/)/i.test(m.image_url) ? m.image_url : '';
+        return `
         <div class="msg-bubble ${m.sender_type}">
           <div class="msg-header">
             <span class="sender ${m.sender_type === 'admin' ? 'admin-sender' : ''}">${esc(m.sender_name || m.sender_email || m.sender_type)}</span>
             <span class="time">${new Date(m.created_at).toLocaleString()}</span>
           </div>
           <div class="msg-body">${esc(m.body)}</div>
+          ${shot ? `<a href="${shot}" target="_blank" rel="noopener"><img class="kora-ctx-shot" src="${shot}" alt="attached screenshot"></a>` : ''}
           ${m.source !== 'app' ? `<div class="msg-source">via ${m.source}</div>` : ''}
         </div>
-      `).join('')}
+      `;}).join('')}
     </div>
 
     ${notes.length > 0 ? `
@@ -949,13 +956,57 @@ async function openTicket(id) {
         <div class="tab active" onclick="switchReplyTab(this,'reply')">Reply to User</div>
         <div class="tab" onclick="switchReplyTab(this,'note')">Internal Note</div>
       </div>
-      <textarea id="replyBody" placeholder="Type your reply..."></textarea>
+      <textarea id="replyBody" placeholder="Type your reply..." onpaste="handleReplyPaste(event)"></textarea>
+      <div id="replyShotPreview" class="reply-shot-preview hidden">
+        <img id="replyShotImg" src="" alt="attached screenshot">
+        <button type="button" class="btn btn-ghost btn-sm" onclick="clearReplyShot()">Remove</button>
+      </div>
       <div class="actions">
         <button class="btn btn-primary" id="replyBtn" onclick="sendReply('${t.id}')">Send Reply</button>
         <button class="btn btn-ghost hidden" id="noteBtn" onclick="sendNote('${t.id}')">Add Note</button>
+        <label class="btn btn-ghost btn-sm" id="replyShotLabel" style="cursor:pointer;">
+          📎 Attach screenshot
+          <input type="file" id="replyShotInput" accept="image/*" class="hidden" onchange="handleReplyShotInput(event)">
+        </label>
       </div>
     </div>
   `;
+  replyShotDataUrl = null;
+}
+
+// Screenshot to attach to the next reply — a paste, or the file picker,
+// either way turned into a data URL client-side. There is no upload
+// endpoint here; the string travels the same way tickets.image_url already
+// does for inbound screenshots.
+let replyShotDataUrl = null;
+
+function setReplyShot(dataUrl) {
+  replyShotDataUrl = dataUrl;
+  document.getElementById('replyShotImg').src = dataUrl;
+  document.getElementById('replyShotPreview').classList.remove('hidden');
+}
+
+function clearReplyShot() {
+  replyShotDataUrl = null;
+  document.getElementById('replyShotInput').value = '';
+  document.getElementById('replyShotPreview').classList.add('hidden');
+}
+
+function handleReplyShotInput(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => setReplyShot(reader.result);
+  reader.readAsDataURL(file);
+}
+
+function handleReplyPaste(event) {
+  const item = Array.from(event.clipboardData?.items || []).find(i => i.type.startsWith('image/'));
+  if (!item) return;
+  event.preventDefault();
+  const reader = new FileReader();
+  reader.onload = () => setReplyShot(reader.result);
+  reader.readAsDataURL(item.getAsFile());
 }
 
 let replyMode = 'reply';
@@ -966,12 +1017,14 @@ function switchReplyTab(el, mode) {
   document.getElementById('replyBody').placeholder = mode === 'reply' ? 'Type your reply...' : 'Add an internal note...';
   document.getElementById('replyBtn').classList.toggle('hidden', mode === 'note');
   document.getElementById('noteBtn').classList.toggle('hidden', mode === 'reply');
+  document.getElementById('replyShotLabel').classList.toggle('hidden', mode === 'note');
+  if (mode === 'note') clearReplyShot();
 }
 
 async function sendReply(ticketId) {
   const body = document.getElementById('replyBody').value.trim();
   if (!body) return;
-  const r = await api('POST', `/api/tickets/${ticketId}/reply`, { body });
+  const r = await api('POST', `/api/tickets/${ticketId}/reply`, { body, imageUrl: replyShotDataUrl });
   if (r.ok) { openTicket(ticketId); } else { alert(r.reason || 'Failed'); }
 }
 

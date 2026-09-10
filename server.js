@@ -13,7 +13,9 @@ const app = express();
 // Health check — must be first, before any middleware
 app.get('/health', (req, res) => res.send('ok'));
 
-app.use(express.json({ limit: '5mb' }));
+// 10mb to leave room for a screenshot attached to an admin reply, base64-encoded
+// inline — the same way an inbound ticket's screenshot already travels.
+app.use(express.json({ limit: '10mb' }));
 app.use(cookieParser());
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.static(path.join(__dirname, 'public')));
@@ -192,6 +194,9 @@ async function initDB() {
     // sweep, cleared when someone here has looked — this is what replaces
     // reading every studio's queue to check they are keeping up.
     await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS stale_at TIMESTAMPTZ`).catch(()=>{});
+    // Lets an admin attach a screenshot to their reply, same as a user can when
+    // filing the ticket.
+    await client.query(`ALTER TABLE ticket_messages ADD COLUMN IF NOT EXISTS image_url TEXT`).catch(()=>{});
     // Push, per device. Support is answered only here now, so “I did not see
     // it” is a real failure. endpoint is UNIQUE so re-subscribing the same
     // browser updates its row instead of doubling every notification.
@@ -895,7 +900,7 @@ app.get('/api/hooks/ticket/:id/messages', requireApiKey, async (req, res) => {
     if (ticket.rows.length === 0) return res.json({ ok: false, reason: 'Ticket not found' });
 
     const messages = await pool.query(
-      `SELECT id, sender_type, sender_name, body, source, created_at
+      `SELECT id, sender_type, sender_name, body, source, image_url, created_at
        FROM ticket_messages WHERE ticket_id=$1 ORDER BY created_at ASC`,
       [id]
     );
@@ -1016,8 +1021,11 @@ app.get('/api/tickets/:id', requireAdmin, async (req, res) => {
 app.post('/api/tickets/:id/reply', requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { body } = req.body;
+    const { body, imageUrl } = req.body;
     if (!body) return res.json({ ok: false, reason: 'body required' });
+    // Only ever store an http(s) link or an actual image data URL — same rule
+    // koraContextPanel applies on the way in.
+    const shot = imageUrl && /^(https?:\/\/|data:image\/)/i.test(imageUrl) ? imageUrl : null;
 
     const ticket = await pool.query(
       'SELECT t.*, a.name as app_name, a.color as app_color, a.api_key as app_api_key, a.callback_url as app_callback_url FROM tickets t LEFT JOIN apps a ON a.id=t.app_id WHERE t.id=$1',
@@ -1028,9 +1036,9 @@ app.post('/api/tickets/:id/reply', requireAdmin, async (req, res) => {
     const t = ticket.rows[0];
 
     await pool.query(
-      `INSERT INTO ticket_messages (ticket_id, sender_type, sender_name, sender_email, body, source)
-       VALUES ($1,'admin',$2,$3,$4,'dashboard')`,
-      [id, req.admin.name || req.admin.email, req.admin.email, body]
+      `INSERT INTO ticket_messages (ticket_id, sender_type, sender_name, sender_email, body, source, image_url)
+       VALUES ($1,'admin',$2,$3,$4,'dashboard',$5)`,
+      [id, req.admin.name || req.admin.email, req.admin.email, body, shot]
     );
 
     // Update status to in_progress if it was open
@@ -1055,6 +1063,7 @@ app.post('/api/tickets/:id/reply', requireAdmin, async (req, res) => {
         body: JSON.stringify({
           externalId: t.external_id,
           body,
+          imageUrl: shot,
           senderName: req.admin.name || 'Support',
           senderEmail: req.admin.email || ''
         })
@@ -1075,6 +1084,7 @@ app.post('/api/tickets/:id/reply', requireAdmin, async (req, res) => {
             <div style="border:1px solid #e5e7eb;border-top:0;padding:20px;border-radius:0 0 8px 8px;">
               <p>Hi ${t.from_name || 'there'},</p>
               <div style="white-space:pre-wrap;margin:16px 0;padding:16px;background:#f9fafb;border-radius:6px;">${body}</div>
+              ${shot ? `<img src="${shot}" alt="screenshot" style="max-width:100%;border-radius:6px;border:1px solid #e5e7eb;margin-bottom:16px;">` : ''}
               <hr style="border:0;border-top:1px solid #e5e7eb;margin:16px 0;">
               <p style="color:#6b7280;font-size:14px;">Simply reply to this email to respond.</p>
             </div>
