@@ -225,6 +225,9 @@
     <div id="loginErr" class="login-err"></div>
     <input id="loginEmail" type="email" placeholder="Email" autofocus>
     <input id="loginPass" type="password" placeholder="Password" onkeydown="if(event.key==='Enter')doLogin()">
+    <!-- Cloudflare Turnstile ("I'm not a robot"). Empty and hidden unless the
+         server has a site key configured — see initTurnstile(). -->
+    <div id="turnstileWidget" style="margin-bottom:12px;"></div>
     <button class="btn btn-primary" onclick="doLogin()">Sign In</button>
   </div>
 </div>
@@ -606,13 +609,46 @@ async function checkAuth() {
   }
 }
 
+// ── Cloudflare Turnstile ("I'm not a robot") on the login form ──
+// Entirely inert — no script loaded, no widget rendered — unless the server
+// has TURNSTILE_SITE_KEY set (see GET /api/config). A deploy with nothing
+// configured never touches Cloudflare at all.
+var turnstileToken = '';
+var turnstileWidgetId = null;
+async function initTurnstile() {
+  const box = document.getElementById('turnstileWidget');
+  try {
+    const cfg = await api('GET', '/api/config');
+    const siteKey = cfg && cfg.turnstileSiteKey;
+    if (!siteKey || !box) return;
+    window.__turnstileOnLoad = function() {
+      try {
+        turnstileWidgetId = turnstile.render(box, {
+          sitekey: siteKey,
+          callback: function(token) { turnstileToken = token || ''; },
+          'expired-callback': function() { turnstileToken = ''; },
+          'error-callback': function() { turnstileToken = ''; },
+        });
+      } catch (e) { console.warn('Turnstile render failed:', e); }
+    };
+    const s = document.createElement('script');
+    s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?onload=__turnstileOnLoad&render=explicit';
+    s.async = true; s.defer = true;
+    document.head.appendChild(s);
+  } catch (e) { console.warn('Turnstile config fetch failed:', e); }
+}
+function resetTurnstile() {
+  turnstileToken = '';
+  try { if (turnstileWidgetId !== null && window.turnstile) turnstile.reset(turnstileWidgetId); } catch(e) {}
+}
+
 async function doLogin() {
   const email = document.getElementById('loginEmail').value.trim();
   const pass = document.getElementById('loginPass').value;
   const errEl = document.getElementById('loginErr');
   errEl.style.display = 'none';
   if (!email || !pass) { errEl.textContent = 'Please enter email and password'; errEl.style.display = 'block'; return; }
-  const r = await api('POST', '/api/auth/login', { email, password: pass });
+  const r = await api('POST', '/api/auth/login', { email, password: pass, turnstileToken });
   if (r.ok) {
     STATE.admin = r.admin;
     document.getElementById('loginView').classList.add('hidden');
@@ -622,6 +658,7 @@ async function doLogin() {
     loadDashboard();
     loadApps();
   } else {
+    resetTurnstile();
     errEl.textContent = r.reason || 'Login failed';
     errEl.style.display = 'block';
   }
@@ -1610,6 +1647,7 @@ function toggleTheme() {
 
 initTheme();
 checkAuth();
+initTurnstile();
 
 // ── Service Worker ─────────────────────────────────────────────────
 if ('serviceWorker' in navigator) {

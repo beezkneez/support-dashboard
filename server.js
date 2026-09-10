@@ -393,11 +393,44 @@ async function requireApiKey(req, res, next) {
   next();
 }
 
+// Cloudflare Turnstile check for /api/auth/login. Off entirely (returns ok)
+// when TURNSTILE_SECRET_KEY isn't set, so a deploy with no key configured
+// behaves exactly as it did before this existed. Never throws: a network
+// hiccup talking to Cloudflare must not be able to lock everyone out of login.
+async function verifyTurnstile(token, ip) {
+  const secret = process.env.TURNSTILE_SECRET_KEY;
+  if (!secret) return { ok: true };
+  if (!token) return { ok: false, reason: 'Please complete the verification check.' };
+  try {
+    const body = new URLSearchParams({ secret, response: String(token) });
+    if (ip) body.set('remoteip', String(ip));
+    const r = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body,
+    });
+    const j = await r.json();
+    if (!j || !j.success) return { ok: false, reason: 'Verification check failed — please try again.' };
+    return { ok: true };
+  } catch (e) {
+    console.error('Turnstile verify error:', e.message);
+    // Fail open: a Cloudflare outage should not be able to take down login.
+    return { ok: true };
+  }
+}
+
+// Public: the login page needs the site key (safe to expose by design) before
+// it can render the Turnstile widget. Empty string means the feature is off.
+app.get('/api/config', (req, res) => {
+  res.json({ ok: true, turnstileSiteKey: process.env.TURNSTILE_SITE_KEY || '' });
+});
+
 // ── Auth Routes ─────────────────────────────────────────────────────
 app.post('/api/auth/login', async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password, turnstileToken } = req.body;
     if (!email || !password) return res.json({ ok: false, reason: 'Email and password required' });
+
+    const tsCheck = await verifyTurnstile(turnstileToken, req.ip);
+    if (!tsCheck.ok) return res.json({ ok: false, reason: tsCheck.reason, captchaFailed: true });
 
     const result = await pool.query('SELECT * FROM admin_users WHERE email=$1', [email.toLowerCase().trim()]);
     if (result.rows.length === 0) return res.json({ ok: false, reason: 'Invalid credentials' });
