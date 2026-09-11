@@ -95,6 +95,19 @@
   .priority-high { color: var(--warn); }
   .priority-urgent { color: var(--danger); }
 
+  /* ── Progress Tree ──────────────── */
+  .tnode { display: flex; align-items: center; gap: 8px; padding: 6px 4px; border-radius: 6px; }
+  .tnode:hover { background: var(--accent-light); }
+  .tchev { width: 14px; text-align: center; cursor: pointer; color: var(--muted); font-size: 11px; user-select: none; }
+  .tlabel { font-size: 13.5px; font-weight: 600; flex: 1; min-width: 0; }
+  .tbar-wrap { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+  .tbar { width: 90px; height: 7px; background: var(--border); border-radius: 4px; overflow: hidden; }
+  .tbar-fill { height: 100%; background: var(--success); border-radius: 4px; }
+  .tpct { font-size: 11.5px; color: var(--muted); width: 34px; text-align: right; }
+  .tuntracked { font-size: 11.5px; color: var(--muted); font-style: italic; }
+  .titem { display: flex; align-items: center; gap: 8px; padding: 4px 4px; font-size: 12.5px; color: var(--muted); }
+  .titem .tcheck { cursor: pointer; width: 14px; text-align: center; }
+
   .type-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
   .type-bug { background: #fee2e2; color: #991b1b; }
   .type-message { background: #e0e7ff; color: #3730a3; }
@@ -255,6 +268,10 @@
         <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="5" height="12" rx="1"/><rect x="9" y="2" width="5" height="7" rx="1"/><rect x="9" y="10.5" width="5" height="3.5" rx="1"/></svg>
         Dev Tracker
       </a>
+      <a href="#" data-page="devtree" onclick="showPage('devtree')">
+        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 2v4M8 6L4 9M8 6l4 3M4 9v3M12 9v3"/><circle cx="8" cy="2" r="1.4"/><circle cx="4" cy="9" r="1.4"/><circle cx="12" cy="9" r="1.4"/><circle cx="4" cy="13" r="1.4"/><circle cx="12" cy="13" r="1.4"/></svg>
+        Progress Tree
+      </a>
       <a href="#" data-page="changelog" onclick="showPage('changelog')">
         <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 2h8v12l-4-2-4 2z"/></svg>
         Changelog
@@ -361,6 +378,7 @@
           <input type="text" id="dtNewTitle" placeholder="Title" style="flex:1;min-width:200px;">
           <select id="dtNewPriority"><option value="low">Low</option><option value="normal" selected>Normal</option><option value="high">High</option></select>
           <input type="text" id="dtNewCategory" placeholder="Category (optional)" style="width:160px;">
+          <select id="dtNewSection"><option value="">No section</option></select>
         </div>
         <textarea id="dtNewDesc" placeholder="Description (optional)" style="width:100%;min-height:50px;margin-bottom:8px;"></textarea>
         <button class="btn btn-primary" onclick="addDevTrackerCard()">Add to Backlog</button>
@@ -375,6 +393,13 @@
           <div id="dtDone"></div>
         </div>
       </div>
+    </div>
+
+    <!-- ── Progress Tree Page ── -->
+    <div id="pageDevTree" class="hidden">
+      <h1 class="page-title">Progress Tree</h1>
+      <div class="muted" style="font-size:12.5px;margin-bottom:14px;">Every section of Aradia Time, rolled up from Dev Tracker cards tagged to it. Tag a card to a section from the Dev Tracker page and it counts here automatically — nothing to sync.</div>
+      <div id="devTreeRoot"></div>
     </div>
 
     <!-- ── Changelog Page ── -->
@@ -673,7 +698,7 @@ async function doLogout() {
 
 // ── Navigation ─────────────────────────────────────────────────────
 function showPage(page) {
-  ['Dashboard', 'Tickets', 'TicketDetail', 'Requests', 'RequestDetail', 'DevTracker', 'Changelog', 'Tenants', 'Settings'].forEach(p => {
+  ['Dashboard', 'Tickets', 'TicketDetail', 'Requests', 'RequestDetail', 'DevTracker', 'DevTree', 'Changelog', 'Tenants', 'Settings'].forEach(p => {
     document.getElementById('page' + p).classList.add('hidden');
   });
   document.querySelectorAll('.sidebar nav a').forEach(a => a.classList.remove('active'));
@@ -700,6 +725,10 @@ function showPage(page) {
     document.getElementById('pageDevTracker').classList.remove('hidden');
     document.querySelector('[data-page=devtracker]').classList.add('active');
     loadDevTracker();
+  } else if (page === 'devtree') {
+    document.getElementById('pageDevTree').classList.remove('hidden');
+    document.querySelector('[data-page=devtree]').classList.add('active');
+    loadDevTree();
   } else if (page === 'changelog') {
     document.getElementById('pageChangelog').classList.remove('hidden');
     document.querySelector('[data-page=changelog]').classList.add('active');
@@ -1416,7 +1445,44 @@ async function loadDevTracker() {
   const r = await api('GET', '/api/dev-tracker');
   if (!r.ok) return;
   _devTrackerCache = r.items;
+  await ensureTreeSections_();
   renderDevTracker();
+  const sel = document.getElementById('dtNewSection');
+  if (sel) sel.innerHTML = sectionOptionsHtml_('');
+}
+
+// ── Progress Tree section list, shared by the Dev Tracker "Add a card" /
+// per-card pickers and the tree page itself ──
+let _treeSectionsCache = null; // flat [{id,parent_id,slug,label,sort_order}]
+let _treeSectionsFlatOrdered = null; // same rows, tree-order, with .depth
+async function ensureTreeSections_() {
+  if (_treeSectionsCache) return _treeSectionsCache;
+  const r = await api('GET', '/api/tree-sections');
+  _treeSectionsCache = (r.ok ? r.sections : []) || [];
+  const byParent = new Map();
+  _treeSectionsCache.forEach(s => {
+    const key = s.parent_id || '__root__';
+    if (!byParent.has(key)) byParent.set(key, []);
+    byParent.get(key).push(s);
+  });
+  const ordered = [];
+  (function walk(parentKey, depth) {
+    (byParent.get(parentKey) || []).forEach(s => {
+      ordered.push({ ...s, depth });
+      walk(s.id, depth + 1);
+    });
+  })('__root__', 0);
+  _treeSectionsFlatOrdered = ordered;
+  return _treeSectionsCache;
+}
+function sectionOptionsHtml_(selectedId) {
+  return '<option value="">No section</option>' + (_treeSectionsFlatOrdered || []).map(s =>
+    `<option value="${s.id}"${s.id === selectedId ? ' selected' : ''}>${'— '.repeat(s.depth)}${esc(s.label)}</option>`
+  ).join('');
+}
+async function changeDevTrackerSection(id, sectionId) {
+  await api('POST', '/api/dev-tracker', { id, sectionId: sectionId || null });
+  loadDevTracker();
 }
 
 function renderDevTracker() {
@@ -1447,11 +1513,12 @@ function renderDevTrackerCard(item) {
         ${item.assigned_to ? '👤 ' + esc(item.assigned_to) : 'Unassigned'}
         ${item.timeline_note ? ' · ⏱ ' + esc(item.timeline_note) : ''}
       </div>
-      <div style="display:flex;gap:8px;">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
         ${item.status === 'done'
           ? `<button class="btn" onclick="toggleDevTrackerStatus('${item.id}','backlog')">↩ Back to backlog</button>`
           : `<button class="btn btn-primary" onclick="toggleDevTrackerStatus('${item.id}','done')">✓ Mark done</button>`}
         <button class="btn" onclick="deleteDevTrackerCard('${item.id}')">Delete</button>
+        <select style="font-size:12px;" onchange="changeDevTrackerSection('${item.id}', this.value)">${sectionOptionsHtml_(item.section_id)}</select>
       </div>
     </div>
   `;
@@ -1474,11 +1541,89 @@ async function addDevTrackerCard() {
   const priority = document.getElementById('dtNewPriority').value;
   const category = document.getElementById('dtNewCategory').value.trim();
   const description = document.getElementById('dtNewDesc').value.trim();
-  await api('POST', '/api/dev-tracker', { title, priority, category, description });
+  const sectionId = document.getElementById('dtNewSection').value || null;
+  await api('POST', '/api/dev-tracker', { title, priority, category, description, sectionId });
   document.getElementById('dtNewTitle').value = '';
   document.getElementById('dtNewDesc').value = '';
   document.getElementById('dtNewCategory').value = '';
+  document.getElementById('dtNewSection').value = '';
   loadDevTracker();
+}
+
+// ── Progress Tree page ──────────────────────────────────────────────
+let _devTreeExpanded = null;
+function loadTreeExpandState_() {
+  if (_devTreeExpanded) return _devTreeExpanded;
+  try { _devTreeExpanded = JSON.parse(localStorage.getItem('devTreeExpanded') || '{}'); }
+  catch (e) { _devTreeExpanded = {}; }
+  return _devTreeExpanded;
+}
+function saveTreeExpandState_() {
+  try { localStorage.setItem('devTreeExpanded', JSON.stringify(_devTreeExpanded || {})); } catch (e) {}
+}
+function toggleTreeNode(id) {
+  const st = loadTreeExpandState_();
+  st[id] = !st[id];
+  saveTreeExpandState_();
+  renderDevTree();
+}
+async function toggleDevTreeItem(id, status) {
+  await api('POST', '/api/dev-tracker', { id, status });
+  loadDevTree();
+}
+
+let _devTreeCache = null;
+async function loadDevTree() {
+  const r = await api('GET', '/api/dev-tracker-tree');
+  if (!r.ok) return;
+  _devTreeCache = r.tree;
+  loadTreeExpandState_();
+  // Top-level branches open by default the very first time this loads on a
+  // device -- after that, whatever the person left expanded is remembered.
+  if (Object.keys(_devTreeExpanded).length === 0) {
+    _devTreeCache.forEach(n => { _devTreeExpanded[n.id] = true; });
+    saveTreeExpandState_();
+  }
+  renderDevTree();
+}
+
+function renderDevTree() {
+  const root = document.getElementById('devTreeRoot');
+  if (!root) return;
+  if (!_devTreeCache || !_devTreeCache.length) {
+    root.innerHTML = '<div class="empty-state" style="padding:20px;"><p>No tree sections found.</p></div>';
+    return;
+  }
+  root.innerHTML = _devTreeCache.map(n => renderTreeNode(n, 0)).join('');
+}
+
+function renderTreeNode(node, depth) {
+  const hasKids = node.children.length > 0 || node.items.length > 0;
+  const isOpen = !!_devTreeExpanded[node.id];
+  const chevron = hasKids ? (isOpen ? '▾' : '▸') : '·';
+  const barHtml = node.percent === null
+    ? '<span class="tuntracked">— not tracked yet</span>'
+    : `<div class="tbar-wrap"><div class="tbar"><div class="tbar-fill" style="width:${node.percent}%"></div></div><span class="tpct">${node.percent}%</span></div>`;
+  let html = `
+    <div class="tnode" style="padding-left:${depth * 18}px">
+      <span class="tchev" onclick="toggleTreeNode('${node.id}')">${chevron}</span>
+      <span class="tlabel" onclick="${hasKids ? `toggleTreeNode('${node.id}')` : ''}">${esc(node.label)}</span>
+      ${barHtml}
+    </div>
+  `;
+  if (isOpen) {
+    node.items.forEach(item => {
+      const checkMark = item.status === 'done' ? '✓' : '☐';
+      html += `
+        <div class="titem" style="padding-left:${(depth + 1) * 18}px">
+          <span class="tcheck" onclick="toggleDevTreeItem('${item.id}','${item.status === 'done' ? 'backlog' : 'done'}')">${checkMark}</span>
+          <span>${esc(item.title)}</span>
+        </div>
+      `;
+    });
+    node.children.forEach(c => { html += renderTreeNode(c, depth + 1); });
+  }
+  return html;
 }
 
 // ── Changelog ("What's New") ──────────────────────────────────────────

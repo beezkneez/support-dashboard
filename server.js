@@ -54,6 +54,180 @@ async function sendMail({ to, subject, html, replyTo }) {
   }
 }
 
+// ── Dev Tracker Progress Tree — fixed taxonomy + starter seed ─────────
+// The tree structure below is drawn directly from aradia-time's real nav
+// (ADMIN_NAV, BOOKING_NAV, _portalGroups in that app's public/index.html),
+// plus dedicated top-level branches for the public booking site and for
+// Party Calendar/TSPS/Requests (each of which also appears, unavoidably, as
+// a settings leaf under Admin > Scheduling — see the `cross-ref` labels
+// below; work is never tagged to those four leaves directly, only to the
+// dedicated branch, so they read "not tracked yet" by design, not neglect).
+// Listed parent-before-child so a single pass can resolve parent_id by slug.
+const DEV_TREE_SEED = [
+  // ── Top-level branches ──
+  { slug: 'admin', parent: null, label: 'Admin' },
+  { slug: 'booking_staff', parent: null, label: 'Booking (Staff Management)' },
+  { slug: 'public_booking', parent: null, label: 'Public Booking Site' },
+  { slug: 'portal', parent: null, label: 'Portal' },
+  { slug: 'party_calendar', parent: null, label: 'Party Calendar' },
+  { slug: 'tsps', parent: null, label: 'TSPS' },
+  { slug: 'requests_subsystem', parent: null, label: 'Requests' },
+  { slug: 'launch_readiness', parent: null, label: 'Public Launch Readiness' },
+
+  // ── Admin groups ──
+  { slug: 'admin.payroll', parent: 'admin', label: 'Payroll' },
+  { slug: 'admin.staff', parent: 'admin', label: 'Staff' },
+  { slug: 'admin.education', parent: 'admin', label: 'Education' },
+  { slug: 'admin.leases', parent: 'admin', label: 'Leases & Rentals' },
+  { slug: 'admin.comms', parent: 'admin', label: 'Communication' },
+  { slug: 'admin.sched', parent: 'admin', label: 'Scheduling' },
+  { slug: 'admin.finance', parent: 'admin', label: 'Finance & Billing' },
+  { slug: 'admin.studio', parent: 'admin', label: 'Studio Settings' },
+  { slug: 'admin.system', parent: 'admin', label: 'System' },
+  // Admin > Payroll
+  ...['Pay Periods', 'Notices', 'Late', 'Flagged', 'Export & Reports', 'Sent History', 'Settings']
+    .map((label, i) => ({ slug: `admin.payroll.${i}`, parent: 'admin.payroll', label })),
+  // Admin > Staff
+  ...['Staff Directory', 'Per-Staff Features', 'Quick Permissions', 'Checklists', 'Contracts', 'Certs & Compliance', 'Tax & Banking', 'Write-ups', 'Training Records', 'Settings']
+    .map((label, i) => ({ slug: `admin.staff.${i}`, parent: 'admin.staff', label })),
+  // Admin > Education
+  ...['Manuals', 'Videos', 'Categories', 'Media Library', 'Module Builder', 'Assignments', 'Staff Progress']
+    .map((label, i) => ({ slug: `admin.education.${i}`, parent: 'admin.education', label })),
+  // Admin > Leases & Rentals
+  ...['Subleases', 'Rentals'].map((label, i) => ({ slug: `admin.leases.${i}`, parent: 'admin.leases', label })),
+  // Admin > Communication
+  ...['Staff Announcement', 'Mass Message', 'Announcement', 'Emails & Branding', 'Polls', 'Community Feed']
+    .map((label, i) => ({ slug: `admin.comms.${i}`, parent: 'admin.comms', label })),
+  // Admin > Scheduling (cross-ref leaves — never tag cards here directly)
+  { slug: 'admin.sched.0', parent: 'admin.sched', label: 'TSPS settings (tracked under the TSPS branch)' },
+  { slug: 'admin.sched.1', parent: 'admin.sched', label: 'Requests settings (tracked under the Requests branch)' },
+  { slug: 'admin.sched.2', parent: 'admin.sched', label: 'Party settings (tracked under the Party Calendar branch)' },
+  { slug: 'admin.sched.3', parent: 'admin.sched', label: 'Requests dashboard (tracked under the Requests branch)' },
+  // Admin > Finance & Billing
+  ...['Stripe Finance', 'Subscription'].map((label, i) => ({ slug: `admin.finance.${i}`, parent: 'admin.finance', label })),
+  // Admin > Studio Settings
+  ...['General', 'Modules', 'Themes', 'Theme Builder', 'Portal', 'App Tour', 'Danger Zone']
+    .map((label, i) => ({ slug: `admin.studio.${i}`, parent: 'admin.studio', label })),
+  // Admin > System
+  ...['Dev Tracker', 'Changelog', 'Analytics', 'Freeze Logs', 'Portal Activity']
+    .map((label, i) => ({ slug: `admin.system.${i}`, parent: 'admin.system', label })),
+
+  // ── Booking (Staff Management) groups ──
+  { slug: 'booking_staff.core', parent: 'booking_staff', label: 'Core' },
+  { slug: 'booking_staff.people', parent: 'booking_staff', label: 'People' },
+  { slug: 'booking_staff.classes', parent: 'booking_staff', label: 'Classes & Scheduling' },
+  { slug: 'booking_staff.sell', parent: 'booking_staff', label: 'Sell & Promote' },
+  { slug: 'booking_staff.comms', parent: 'booking_staff', label: 'Communication' },
+  { slug: 'booking_staff.marketing', parent: 'booking_staff', label: 'Marketing' },
+  { slug: 'booking_staff.account', parent: 'booking_staff', label: 'Account' },
+  ...['Dashboard', 'Schedule', 'My Schedule', 'My Store', 'Pickups', 'My Settings']
+    .map((label, i) => ({ slug: `booking_staff.core.${i}`, parent: 'booking_staff.core', label })),
+  ...['Students', 'Student Analysis', 'Staff']
+    .map((label, i) => ({ slug: `booking_staff.people.${i}`, parent: 'booking_staff.people', label })),
+  ...['Class Types', 'All Classes', 'Categories', 'Skills', 'Tags', 'Par-Q Form', 'Waiver', 'Registration Questionnaire', 'Make-up Credits', 'Auto Cancel/Postpone', 'Locations & Rooms', 'Holidays & Closures']
+    .map((label, i) => ({ slug: `booking_staff.classes.${i}`, parent: 'booking_staff.classes', label })),
+  ...['Sales & Analytics', 'Memberships & Passes', 'Storefronts', 'Events & Tickets', 'Promo Codes', 'Gift Cards']
+    .map((label, i) => ({ slug: `booking_staff.sell.${i}`, parent: 'booking_staff.sell', label })),
+  ...['Announcements', 'Student Chat']
+    .map((label, i) => ({ slug: `booking_staff.comms.${i}`, parent: 'booking_staff.comms', label })),
+  { slug: 'booking_staff.marketing.0', parent: 'booking_staff.marketing', label: 'Guest Page (tracked under Public Booking Site)' },
+  ...['Leads', 'Newsletter', 'Texts', 'Settings']
+    .map((label, i) => ({ slug: `booking_staff.marketing.${i + 1}`, parent: 'booking_staff.marketing', label })),
+  ...['Billing', 'Taxes & Fees', 'Check-in QR', 'Preferences']
+    .map((label, i) => ({ slug: `booking_staff.account.${i}`, parent: 'booking_staff.account', label })),
+
+  // ── Public Booking Site (guest.html / member.html — live at book.aradiafitness.app) ──
+  { slug: 'public_booking.guest', parent: 'public_booking', label: 'Guest Landing & Signup' },
+  { slug: 'public_booking.member', parent: 'public_booking', label: 'Member App' },
+  ...['Hero/Schedule/Pricing/Testimonials/FAQ Content', 'Signup & Checkout Flow']
+    .map((label, i) => ({ slug: `public_booking.guest.${i}`, parent: 'public_booking.guest', label })),
+  ...['Class Booking', 'Account & Billing', 'Passes & Memberships', 'Shop Checkout', 'Notifications', 'Set-Password/Auth']
+    .map((label, i) => ({ slug: `public_booking.member.${i}`, parent: 'public_booking.member', label })),
+
+  // ── Portal groups ──
+  { slug: 'portal.yearglance', parent: 'portal', label: 'Year at a Glance' },
+  { slug: 'portal.importantinfo', parent: 'portal', label: 'Important Info' },
+  { slug: 'portal.edu', parent: 'portal', label: 'Education' },
+  { slug: 'portal.studios', parent: 'portal', label: 'Studios' },
+  { slug: 'portal.collab', parent: 'portal', label: 'Projects' },
+  { slug: 'portal.onboarding', parent: 'portal', label: 'My Info' },
+  { slug: 'portal.news', parent: 'portal', label: 'News' },
+  { slug: 'portal.leaderboard', parent: 'portal', label: 'Leaderboard' },
+  ...['Calendar'].map((label, i) => ({ slug: `portal.yearglance.${i}`, parent: 'portal.yearglance', label })),
+  ...['Pages'].map((label, i) => ({ slug: `portal.importantinfo.${i}`, parent: 'portal.importantinfo', label })),
+  ...['Manuals', 'Videos', 'Modules', 'Favourites', 'Categories', 'Module Builder', 'Media Library', 'Staff Meetings', 'Training Registration', 'Resources']
+    .map((label, i) => ({ slug: `portal.edu.${i}`, parent: 'portal.edu', label })),
+  ...['Equipment', 'Inventory', 'Incidents', 'Sign Out']
+    .map((label, i) => ({ slug: `portal.studios.${i}`, parent: 'portal.studios', label })),
+  ...['Projects'].map((label, i) => ({ slug: `portal.collab.${i}`, parent: 'portal.collab', label })),
+  ...['Certifications', 'My Training', 'Contract', 'Subleases', 'Tax & Banking', 'Checklist', 'Policies', 'Emergency Contact', 'Feature Request']
+    .map((label, i) => ({ slug: `portal.onboarding.${i}`, parent: 'portal.onboarding', label })),
+  ...["News", "What's New"].map((label, i) => ({ slug: `portal.news.${i}`, parent: 'portal.news', label })),
+  ...['Promo Leaderboard'].map((label, i) => ({ slug: `portal.leaderboard.${i}`, parent: 'portal.leaderboard', label })),
+
+  // ── Party Calendar (own branch — see cross-ref note above) ──
+  ...['Calendar Board (v2)', 'Booking/Request Intake', 'Settings (colour, sender name)', 'Notification Categories', 'Admin Permissions']
+    .map((label, i) => ({ slug: `party_calendar.${i}`, parent: 'party_calendar', label })),
+
+  // ── TSPS (own branch) ──
+  ...['Shift Board/Calendar', 'Shift Categories (colour/keyword config)', 'Settings (sender name)', 'Notification Categories', 'Digest']
+    .map((label, i) => ({ slug: `tsps.${i}`, parent: 'tsps', label })),
+
+  // ── Requests (own branch) ──
+  ...['Requests Dashboard (proposals)', 'Settings (colour, sender name)', 'Notification Categories', 'Request → Class Conversion']
+    .map((label, i) => ({ slug: `requests_subsystem.${i}`, parent: 'requests_subsystem', label })),
+
+  // ── Public Launch Readiness — each leaf here also gets its own seed card (below) ──
+  { slug: 'launch_readiness.noshow_fee', parent: 'launch_readiness', label: 'No-show/Late-Cancel Fee Charging' },
+  { slug: 'launch_readiness.stripe_migration', parent: 'launch_readiness', label: 'Stripe Account Migration Verification' },
+  { slug: 'launch_readiness.legacy_billing', parent: 'launch_readiness', label: 'Legacy Member Billing Migration Tool' },
+  { slug: 'launch_readiness.golive_checklist', parent: 'launch_readiness', label: 'Go-Live Checklist' },
+  { slug: 'launch_readiness.cancel_policy', parent: 'launch_readiness', label: 'Cancel-Policy Field Consistency' },
+  { slug: 'launch_readiness.guest_content', parent: 'launch_readiness', label: 'Guest Page Content Completeness' },
+].map((n, i) => ({ ...n, sortOrder: i }));
+
+// Starter Dev Tracker cards, tagged at group level (not every leaf) except
+// under Public Launch Readiness, where each concrete gap gets its own card.
+// seedKey makes every row idempotent to re-insert — never touched again
+// after the first successful boot, so a rename/edit here later does nothing.
+const DEV_TREE_CARD_SEED = [
+  { section: 'admin.payroll', title: 'Payroll — pay periods, export, notices', status: 'done', description: 'Pay period review, flag/late handling, export & reports, sent history all built and in production use.' },
+  { section: 'admin.staff', title: 'Staff directory, onboarding & permissions', status: 'done', description: 'Directory, checklists, contracts, certs, tax/banking, write-ups, training records, per-staff features and quick permissions all shipped.' },
+  { section: 'admin.education', title: 'Admin-side Education tooling', status: 'backlog', description: 'EDU LMS absorption from the standalone Aradia EDU site into Admin > Education (module builder, assignment cross-linking) is in progress on the edu-integration worktree.' },
+  { section: 'admin.leases', title: 'Subleases & rentals', status: 'done', description: 'Sublease and rental management built; sublease e-sign flow shipped.' },
+  { section: 'admin.comms', title: 'Staff & studio communication tools', status: 'done', description: 'Staff announcements, mass message, announcements, email branding, polls, community feed all shipped.' },
+  { section: 'admin.sched', title: 'Scheduling settings hub', status: 'done', description: 'The unified settings screen holding TSPS/Requests/Party recipients is built; see the TSPS, Requests and Party Calendar branches for the actual subsystem work.' },
+  { section: 'admin.finance', title: 'Stripe Finance & Subscription (Kronara billing)', status: 'done', description: 'Platform-level Stripe finance view and Kronara subscription billing shipped.' },
+  { section: 'admin.studio', title: 'Studio Settings', status: 'done', description: 'General, Modules, Themes, Theme Builder, Portal settings, App Tour, Danger Zone all built.' },
+  { section: 'admin.system', title: 'System tools', status: 'done', description: 'In-app Dev Tracker (now superseded by support-dashboard), Changelog authoring, Analytics, Freeze Logs, Portal Activity all shipped.' },
+  { section: 'booking_staff.core', title: 'Booking daily-ops screens', status: 'done', description: 'Dashboard, Schedule, My Schedule, My Store, Pickups, My Settings all shipped.' },
+  { section: 'booking_staff.people', title: 'Students & staff management (booking side)', status: 'done', description: 'Student roster, student analysis, staff list all built.' },
+  { section: 'booking_staff.classes', title: 'Classes & scheduling configuration', status: 'done', description: 'Class types, categories, skills, tags, Par-Q, waiver, registration questionnaire, make-up credits, auto cancel/postpone, locations & rooms, holidays all shipped.' },
+  { section: 'booking_staff.sell', title: 'Sell & Promote', status: 'done', description: 'Sales & analytics, memberships & passes, storefronts, events & tickets, promo codes, gift cards all built.' },
+  { section: 'booking_staff.comms', title: 'Booking-side communication', status: 'done', description: 'Announcements and student chat shipped.' },
+  { section: 'booking_staff.marketing', title: 'Marketing tools — newsletter & leads', status: 'backlog', description: 'Newsletter segmentation and lead automations are active work on the aradia-newsletter worktree; guest page editor and texts are built.' },
+  { section: 'booking_staff.account', title: 'Account settings (billing, fees, check-in)', status: 'done', description: 'Billing, taxes & fees, check-in QR, preferences all shipped.' },
+  { section: 'public_booking.guest', title: 'Public guest landing & signup/checkout', status: 'done', description: 'guest.html sales page and signup/checkout flow are live in production at book.aradiafitness.app.' },
+  { section: 'public_booking.member', title: 'Member app (booking, account, shop)', status: 'done', description: 'member.html full member app — class booking, account/billing, passes, shop checkout — is live in production.' },
+  { section: 'portal.yearglance', title: 'Year at a Glance', status: 'done', description: 'Portal calendar view shipped.' },
+  { section: 'portal.importantinfo', title: 'Important Info pages', status: 'done', description: 'Shipped.' },
+  { section: 'portal.edu', title: 'Portal Education', status: 'backlog', description: 'Same EDU LMS absorption effort as Admin Education — module builder, favourites, media library integration ongoing.' },
+  { section: 'portal.studios', title: 'Studios (equipment, inventory, incidents)', status: 'done', description: 'Equipment, inventory, incident reporting, sign-out all shipped.' },
+  { section: 'portal.collab', title: 'Projects', status: 'done', description: 'Shipped.' },
+  { section: 'portal.onboarding', title: 'My Info (certs, training, contracts, tax)', status: 'done', description: 'Certifications, my training, contract, subleases, tax & banking, checklist, policies, emergency contact, feature request form all shipped.' },
+  { section: 'portal.news', title: "News & What's New", status: 'done', description: 'Shipped.' },
+  { section: 'portal.leaderboard', title: 'Promo Leaderboard', status: 'done', description: 'Shipped.' },
+  { section: 'party_calendar', title: 'Party Calendar v2', status: 'done', description: 'Reworked with independent colour and sender-name/notification settings (2026-09-05 rework).' },
+  { section: 'tsps', title: 'TSPS', status: 'done', description: 'Reworked with independent colour and sender-name/notification settings (2026-09-05 rework).' },
+  { section: 'requests_subsystem', title: 'Requests / class proposals', status: 'done', description: 'Requests dashboard and proposal-to-class conversion shipped, independent notification settings split out.' },
+  { section: 'launch_readiness.noshow_fee', title: 'No-show/late-cancel fee Stripe charging', status: 'backlog', description: 'no_show_fee_cents/late_cancel_fee_cents are settable in tenant settings but never actually charged via Stripe — contrast with membership_hold_fee_cents, which is.' },
+  { section: 'launch_readiness.stripe_migration', title: 'Stripe member-payment account migration verification', status: 'backlog', description: 'Confirm member payments are landing in the new connected account (acct_1U6IrI...), not the original (acct_1PssVL...), per docs/STRIPE-SAFETY.md.' },
+  { section: 'launch_readiness.legacy_billing', title: 'Legacy member billing migration tool', status: 'backlog', description: "Existing Aradia members are still billed via Groovio's own saved-card scheduler, not real Stripe Subscriptions; a bulk-import/migration tool doesn't exist yet per docs/STRIPE_MIGRATION_PLAN.md." },
+  { section: 'launch_readiness.golive_checklist', title: 'Go-live checklist', status: 'backlog', description: 'No dedicated go-live checklist exists for a booking launch; needs to be written and tracked somewhere durable.' },
+  { section: 'launch_readiness.cancel_policy', title: 'Cancel-policy field consistency', status: 'backlog', description: 'Admin UI may write class_types.cancel_hours, which code comments say is "stored and never read," while enforcement reads class_sessions.cancel_lock_hours. Verify and reconcile.' },
+  { section: 'launch_readiness.guest_content', title: 'Guest page content completeness (Aradia)', status: 'backlog', description: 'Hero/schedule/pricing/testimonials/FAQ population status for Aradia specifically is unconfirmed from static analysis; needs a live check against book.aradiafitness.app.' },
+].map((c, i) => ({ ...c, seedKey: `seed.v1.${c.section}.${i}` }));
+
 // ── Database Init ───────────────────────────────────────────────────
 async function initDB() {
   const client = await pool.connect();
@@ -294,6 +468,35 @@ async function initDB() {
       )
     `).catch(()=>{});
 
+    // Dev Tracker Progress Tree — a fixed, hierarchical taxonomy of every
+    // section of an app (aradia-time to start), so a Dev Tracker card can be
+    // tagged to a section and roll up into a live % complete bar per branch.
+    // app_id-scoped so a future second product's tree never collides with
+    // this one. section_id/seed_key on dev_tracker are fully additive and
+    // nullable -- every existing card (Aradia's and Kronara Build's) simply
+    // has section_id=NULL and stays invisible to the tree.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS tree_sections (
+        id         TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+        app_id     INTEGER REFERENCES apps(id) ON DELETE CASCADE,
+        parent_id  TEXT REFERENCES tree_sections(id) ON DELETE CASCADE,
+        slug       TEXT NOT NULL,
+        label      TEXT NOT NULL,
+        sort_order INTEGER DEFAULT 0,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE (app_id, slug)
+      )
+    `).catch(()=>{});
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_tree_sections_parent ON tree_sections (parent_id)`).catch(()=>{});
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_tree_sections_app ON tree_sections (app_id)`).catch(()=>{});
+    await client.query(`ALTER TABLE dev_tracker ADD COLUMN IF NOT EXISTS section_id TEXT REFERENCES tree_sections(id) ON DELETE SET NULL`).catch(()=>{});
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_dev_tracker_section ON dev_tracker (section_id)`).catch(()=>{});
+    // Guards the one-time starter-card seed below against ever duplicating,
+    // even across repeated boots -- NULL (every normal card) is never
+    // constrained by the partial unique index.
+    await client.query(`ALTER TABLE dev_tracker ADD COLUMN IF NOT EXISTS seed_key TEXT`).catch(()=>{});
+    await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_dev_tracker_seed_key ON dev_tracker (seed_key) WHERE seed_key IS NOT NULL`).catch(()=>{});
+
     // ── Changelog ("What's New") — one list per app, broadcast to every spawn ──
     // Every spawn on the same codebase ships the same underlying changes, so
     // authoring lives here once instead of duplicated per studio. Scoped by
@@ -359,6 +562,45 @@ async function initDB() {
       console.log('[init] Default apps created');
       console.log('[init] Aradia Time API key:', key1);
       console.log('[init] Kronara Build API key:', key2);
+    }
+
+    // Seed the Dev Tracker Progress Tree for Aradia Time, once. Guarded on
+    // tree_sections being empty for that app_id -- never re-runs after the
+    // first successful boot, so a label Jud renames later is never clobbered.
+    const aradiaApp = await client.query(`SELECT id FROM apps WHERE slug='aradia-time'`);
+    const aradiaAppId = aradiaApp.rows[0]?.id;
+    if (aradiaAppId) {
+      const treeExist = await client.query('SELECT COUNT(*) as c FROM tree_sections WHERE app_id=$1', [aradiaAppId]);
+      if (parseInt(treeExist.rows[0].c) === 0) {
+        const slugToId = {};
+        for (const node of DEV_TREE_SEED) {
+          const parentId = node.parent ? slugToId[node.parent] : null;
+          const r = await client.query(
+            `INSERT INTO tree_sections (app_id, parent_id, slug, label, sort_order)
+             VALUES ($1,$2,$3,$4,$5)
+             ON CONFLICT (app_id, slug) DO UPDATE SET slug=EXCLUDED.slug
+             RETURNING id`,
+            [aradiaAppId, parentId, node.slug, node.label, node.sortOrder]
+          );
+          slugToId[node.slug] = r.rows[0].id;
+        }
+        console.log(`[init] Dev tracker tree seeded (${DEV_TREE_SEED.length} sections)`);
+
+        let cardCount = 0;
+        for (const card of DEV_TREE_CARD_SEED) {
+          const sectionId = slugToId[card.section];
+          if (!sectionId) continue;
+          const done = card.status === 'done';
+          await client.query(
+            `INSERT INTO dev_tracker (title, description, status, category, section_id, seed_key, completed_at, completed_by)
+             VALUES ($1,$2,$3,'Seed',$4,$5,$6,$7)
+             ON CONFLICT (seed_key) DO NOTHING`,
+            [card.title, card.description, card.status, sectionId, card.seedKey, done ? new Date().toISOString() : null, done ? 'Seed' : '']
+          );
+          cardCount++;
+        }
+        console.log(`[init] Dev tracker starter cards seeded (${cardCount})`);
+      }
     }
 
     console.log('[init] Database ready');
@@ -1635,6 +1877,7 @@ app.post('/api/dev-tracker', requireAdmin, async (req, res) => {
       if (item.category !== undefined) set('category', item.category);
       if (item.assignedTo !== undefined) set('assigned_to', item.assignedTo);
       if (item.timelineNote !== undefined) set('timeline_note', item.timelineNote);
+      if (item.sectionId !== undefined) set('section_id', item.sectionId || null);
       if (item.status === 'done') { set('completed_at', new Date().toISOString()); set('completed_by', actorName); }
       if (item.status === 'backlog') { set('completed_at', null); set('completed_by', ''); }
       if (sets.length) {
@@ -1645,8 +1888,8 @@ app.post('/api/dev-tracker', requireAdmin, async (req, res) => {
     } else {
       if (!item.title) return res.json({ ok: false, reason: 'title required' });
       await pool.query(
-        `INSERT INTO dev_tracker (title, description, priority, category, assigned_to, timeline_note) VALUES ($1,$2,$3,$4,$5,$6)`,
-        [item.title, item.description || '', item.priority || 'normal', item.category || '', item.assignedTo || '', item.timelineNote || '']
+        `INSERT INTO dev_tracker (title, description, priority, category, assigned_to, timeline_note, section_id) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [item.title, item.description || '', item.priority || 'normal', item.category || '', item.assignedTo || '', item.timelineNote || '', item.sectionId || null]
       );
       res.json({ ok: true });
     }
@@ -1662,6 +1905,106 @@ app.delete('/api/dev-tracker/:id', requireAdmin, async (req, res) => {
     res.json({ ok: true });
   } catch(e) {
     console.error('[dev-tracker delete]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+// appId query param, defaulting to the 'aradia-time' app -- never a hardcoded
+// id, so a second product's tree can be added later just by seeding a second
+// app_id and passing ?appId= for it.
+async function resolveTreeAppId(req) {
+  if (req.query.appId) return parseInt(req.query.appId, 10);
+  const r = await pool.query(`SELECT id FROM apps WHERE slug='aradia-time'`);
+  return r.rows[0]?.id || null;
+}
+
+// Flat list of every tree node for the app -- feeds the section picker
+// dropdown (indented by depth on the client) and the tree page's own fetch.
+app.get('/api/tree-sections', requireAdmin, async (req, res) => {
+  try {
+    const appId = await resolveTreeAppId(req);
+    if (!appId) return res.json({ ok: true, sections: [] });
+    const r = await pool.query(
+      `SELECT id, parent_id, slug, label, sort_order FROM tree_sections WHERE app_id=$1 ORDER BY sort_order`,
+      [appId]
+    );
+    res.json({ ok: true, sections: r.rows });
+  } catch(e) {
+    console.error('[tree-sections]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+// Dev Tracker Progress Tree — full nested tree with a rolled-up % complete
+// per node and the items directly tagged to each one. Computed in JS on
+// every read: the dataset here is dozens to low hundreds of rows, not worth
+// a recursive CTE (nothing else in this file uses one).
+//
+// A node with zero items anywhere beneath it (including itself) rolls up to
+// percent:null, rendered as "not tracked yet" client-side -- never 0% or
+// 100%, since several leaves (the Admin > Scheduling cross-references) are
+// deliberately never tagged directly.
+app.get('/api/dev-tracker-tree', requireAdmin, async (req, res) => {
+  try {
+    const appId = await resolveTreeAppId(req);
+    if (!appId) return res.json({ ok: true, tree: [] });
+    const sections = (await pool.query(
+      `SELECT id, parent_id, slug, label, sort_order FROM tree_sections WHERE app_id=$1 ORDER BY sort_order`,
+      [appId]
+    )).rows;
+    const items = (await pool.query(
+      `SELECT dt.id, dt.title, dt.status, dt.priority, dt.description, dt.section_id
+         FROM dev_tracker dt JOIN tree_sections ts ON ts.id = dt.section_id
+        WHERE ts.app_id=$1
+        ORDER BY CASE WHEN dt.status='backlog' THEN 0 ELSE 1 END, dt.created_at DESC`,
+      [appId]
+    )).rows;
+
+    const byId = new Map(sections.map(s => [s.id, s]));
+    const children = new Map();
+    sections.forEach(s => {
+      if (!s.parent_id) return;
+      if (!children.has(s.parent_id)) children.set(s.parent_id, []);
+      children.get(s.parent_id).push(s.id);
+    });
+    const directItems = new Map();
+    items.forEach(it => {
+      if (!directItems.has(it.section_id)) directItems.set(it.section_id, []);
+      directItems.get(it.section_id).push(it);
+    });
+
+    const rollupCache = new Map();
+    function rollup(id) {
+      if (rollupCache.has(id)) return rollupCache.get(id);
+      const own = directItems.get(id) || [];
+      let done = own.filter(i => i.status === 'done').length;
+      let total = own.length;
+      for (const childId of (children.get(id) || [])) {
+        const c = rollup(childId);
+        done += c.done; total += c.total;
+      }
+      const result = { done, total };
+      rollupCache.set(id, result);
+      return result;
+    }
+
+    function buildNode(id) {
+      const s = byId.get(id);
+      const { done, total } = rollup(id);
+      return {
+        id: s.id,
+        label: s.label,
+        done, total,
+        percent: total === 0 ? null : Math.round((done / total) * 100),
+        items: directItems.get(id) || [],
+        children: (children.get(id) || []).map(buildNode),
+      };
+    }
+
+    const roots = sections.filter(s => !s.parent_id).map(s => buildNode(s.id));
+    res.json({ ok: true, tree: roots });
+  } catch(e) {
+    console.error('[dev-tracker-tree]', e);
     res.json({ ok: false, reason: 'Server error' });
   }
 });
