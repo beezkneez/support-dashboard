@@ -400,6 +400,14 @@
     <div id="pageDevTree" class="hidden">
       <h1 class="page-title">Progress Tree</h1>
       <div class="muted" style="font-size:12.5px;margin-bottom:14px;">Every section of Aradia Time, rolled up from Dev Tracker cards tagged to it. Tag a card to a section from the Dev Tracker page and it counts here automatically — nothing to sync.</div>
+      <div class="card" style="margin-bottom:14px;">
+        <div style="font-weight:700;font-size:13px;margin-bottom:10px;">Add a section</div>
+        <div class="filters">
+          <input type="text" id="tsNewLabel" placeholder="New section name" style="flex:1;min-width:160px;">
+          <input type="text" id="tsNewParent" list="dtSectionList" autocomplete="off" placeholder="Parent (blank = top-level)" style="width:240px;">
+          <button class="btn btn-primary" onclick="addTreeSection_()">Add section</button>
+        </div>
+      </div>
       <div id="devTreeRoot"></div>
     </div>
 
@@ -1611,8 +1619,56 @@ async function toggleDevTreeItem(id, status) {
   loadDevTree();
 }
 
+async function refreshTreeSections_() {
+  _treeSectionsCache = null;
+  _treeSectionsFlatOrdered = null;
+  _sectionLabelToId = null;
+  _sectionIdToLabel = null;
+  await ensureTreeSections_();
+}
+async function addTreeSection_() {
+  const labelInput = document.getElementById('tsNewLabel');
+  const label = labelInput.value.trim();
+  if (!label) return;
+  const parentInput = document.getElementById('tsNewParent');
+  const parentId = resolveSectionInput_(parentInput) || null;
+  const r = await api('POST', '/api/tree-sections', { label, parentId });
+  if (!r.ok) { alert(r.reason || 'Could not add section'); return; }
+  labelInput.value = '';
+  parentInput.value = '';
+  await refreshTreeSections_();
+  loadDevTree();
+}
+function findTreeNode_(id, nodes) {
+  for (const n of (nodes || [])) {
+    if (n.id === id) return n;
+    const found = findTreeNode_(id, n.children);
+    if (found) return found;
+  }
+  return null;
+}
+async function renameTreeSection_(id) {
+  const node = findTreeNode_(id, _devTreeCache);
+  const label = prompt('Rename section:', node ? node.label : '');
+  if (label === null) return;
+  const trimmed = label.trim();
+  if (!trimmed || (node && trimmed === node.label)) return;
+  await api('POST', '/api/tree-sections', { id, label: trimmed });
+  await refreshTreeSections_();
+  loadDevTree();
+}
+async function deleteTreeSection_(id) {
+  const node = findTreeNode_(id, _devTreeCache);
+  const label = node ? node.label : 'this section';
+  if (!confirm(`Delete "${label}"? Any sub-sections go with it. Cards tagged here (or on a deleted sub-section) fall back to "No section" -- they are not deleted.`)) return;
+  await api('DELETE', '/api/tree-sections/' + id);
+  await refreshTreeSections_();
+  loadDevTree();
+}
+
 let _devTreeCache = null;
 async function loadDevTree() {
+  await ensureTreeSections_();
   const r = await api('GET', '/api/dev-tracker-tree');
   if (!r.ok) return;
   _devTreeCache = r.tree;
@@ -1648,6 +1704,10 @@ function renderTreeNode(node, depth) {
       <span class="tchev" onclick="toggleTreeNode('${node.id}')">${chevron}</span>
       <span class="tlabel" onclick="${hasKids ? `toggleTreeNode('${node.id}')` : ''}">${esc(node.label)}</span>
       ${barHtml}
+      <span class="tactions" style="margin-left:8px;">
+        <span title="Rename" style="cursor:pointer;opacity:.55;" onclick="event.stopPropagation();renameTreeSection_('${node.id}')">✎</span>
+        <span title="Delete" style="cursor:pointer;opacity:.55;margin-left:4px;" onclick="event.stopPropagation();deleteTreeSection_('${node.id}')">🗑</span>
+      </span>
     </div>
   `;
   if (isOpen) {

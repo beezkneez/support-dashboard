@@ -1935,6 +1935,51 @@ app.get('/api/tree-sections', requireAdmin, async (req, res) => {
   }
 });
 
+// Create or rename a tree section -- same id-presence convention as
+// POST /api/dev-tracker. slug only exists to satisfy the table's (app_id,
+// slug) unique constraint from the original code-seeded taxonomy; a
+// section added here gets a generated one since nothing keys off it.
+app.post('/api/tree-sections', requireAdmin, async (req, res) => {
+  try {
+    const body = req.body || {};
+    if (body.id) {
+      if (!body.label) return res.json({ ok: false, reason: 'label required' });
+      await pool.query(`UPDATE tree_sections SET label=$1 WHERE id=$2`, [body.label, body.id]);
+      return res.json({ ok: true });
+    }
+    if (!body.label) return res.json({ ok: false, reason: 'label required' });
+    const appId = await resolveTreeAppId(req);
+    if (!appId) return res.json({ ok: false, reason: 'No app to attach this section to' });
+    const parentId = body.parentId || null;
+    const maxOrder = await pool.query(
+      `SELECT COALESCE(MAX(sort_order), -1) AS m FROM tree_sections WHERE app_id=$1 AND parent_id ${parentId ? '= $2' : 'IS NULL'}`,
+      parentId ? [appId, parentId] : [appId]
+    );
+    const slug = 'custom.' + uuidv4();
+    const r = await pool.query(
+      `INSERT INTO tree_sections (app_id, parent_id, slug, label, sort_order) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+      [appId, parentId, slug, body.label, parseInt(maxOrder.rows[0].m, 10) + 1]
+    );
+    res.json({ ok: true, id: r.rows[0].id });
+  } catch(e) {
+    console.error('[tree-sections save]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+// Cascades to child sections (tree_sections.parent_id ON DELETE CASCADE) and
+// orphans any cards tagged here or on a deleted child (dev_tracker.section_id
+// ON DELETE SET NULL puts them back in the untagged backlog, never deletes them).
+app.delete('/api/tree-sections/:id', requireAdmin, async (req, res) => {
+  try {
+    await pool.query(`DELETE FROM tree_sections WHERE id=$1`, [req.params.id]);
+    res.json({ ok: true });
+  } catch(e) {
+    console.error('[tree-sections delete]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
 // Dev Tracker Progress Tree — full nested tree with a rolled-up % complete
 // per node and the items directly tagged to each one. Computed in JS on
 // every read: the dataset here is dozens to low hundreds of rows, not worth
