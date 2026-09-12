@@ -378,8 +378,9 @@
           <input type="text" id="dtNewTitle" placeholder="Title" style="flex:1;min-width:200px;">
           <select id="dtNewPriority"><option value="low">Low</option><option value="normal" selected>Normal</option><option value="high">High</option></select>
           <input type="text" id="dtNewCategory" placeholder="Category (optional)" style="width:160px;">
-          <select id="dtNewSection"><option value="">No section</option></select>
+          <input type="text" id="dtNewSection" list="dtSectionList" placeholder="Search section (optional)..." autocomplete="off" oninput="resolveSectionInput_(this)" style="width:240px;">
         </div>
+        <datalist id="dtSectionList"></datalist>
         <textarea id="dtNewDesc" placeholder="Description (optional)" style="width:100%;min-height:50px;margin-bottom:8px;"></textarea>
         <button class="btn btn-primary" onclick="addDevTrackerCard()">Add to Backlog</button>
       </div>
@@ -1447,18 +1448,19 @@ async function loadDevTracker() {
   _devTrackerCache = r.items;
   await ensureTreeSections_();
   renderDevTracker();
-  const sel = document.getElementById('dtNewSection');
-  if (sel) sel.innerHTML = sectionOptionsHtml_('');
 }
 
 // ── Progress Tree section list, shared by the Dev Tracker "Add a card" /
 // per-card pickers and the tree page itself ──
 let _treeSectionsCache = null; // flat [{id,parent_id,slug,label,sort_order}]
 let _treeSectionsFlatOrdered = null; // same rows, tree-order, with .depth
+let _sectionLabelToId = null; // "Admin > Staff > Settings" -> id, for the search inputs
+let _sectionIdToLabel = null; // id -> "Admin > Staff > Settings"
 async function ensureTreeSections_() {
   if (_treeSectionsCache) return _treeSectionsCache;
   const r = await api('GET', '/api/tree-sections');
   _treeSectionsCache = (r.ok ? r.sections : []) || [];
+  const byId = new Map(_treeSectionsCache.map(s => [s.id, s]));
   const byParent = new Map();
   _treeSectionsCache.forEach(s => {
     const key = s.parent_id || '__root__';
@@ -1473,14 +1475,48 @@ async function ensureTreeSections_() {
     });
   })('__root__', 0);
   _treeSectionsFlatOrdered = ordered;
+
+  function pathLabel(s) {
+    const parts = [s.label];
+    let cur = s;
+    while (cur.parent_id && byId.has(cur.parent_id)) {
+      cur = byId.get(cur.parent_id);
+      parts.unshift(cur.label);
+    }
+    return parts.join(' › ');
+  }
+  _sectionLabelToId = new Map();
+  _sectionIdToLabel = new Map();
+  _treeSectionsCache.forEach(s => {
+    const label = pathLabel(s);
+    _sectionIdToLabel.set(s.id, label);
+    _sectionLabelToId.set(label, s.id);
+  });
+  const datalist = document.getElementById('dtSectionList');
+  if (datalist) datalist.innerHTML = Array.from(_sectionLabelToId.keys()).map(l => `<option value="${esc(l)}">`).join('');
+
   return _treeSectionsCache;
 }
-function sectionOptionsHtml_(selectedId) {
-  return '<option value="">No section</option>' + (_treeSectionsFlatOrdered || []).map(s =>
-    `<option value="${s.id}"${s.id === selectedId ? ' selected' : ''}>${'— '.repeat(s.depth)}${esc(s.label)}</option>`
-  ).join('');
+// Shared by both section-search inputs (new-card form and per-card picker):
+// lets someone type/search instead of scrolling a 179-option dropdown. Typed
+// text is matched against the full breadcrumb path, case-insensitively --
+// an exact match resolves to that section's id (stashed in data-section-id);
+// anything else (including a blank field) is treated as "no section".
+function resolveSectionInput_(input) {
+  const typed = input.value.trim();
+  if (!typed) { input.dataset.sectionId = ''; return ''; }
+  let match = _sectionLabelToId.get(typed);
+  if (!match) {
+    const lower = typed.toLowerCase();
+    for (const [label, id] of _sectionLabelToId) {
+      if (label.toLowerCase() === lower) { match = id; break; }
+    }
+  }
+  input.dataset.sectionId = match || '';
+  return match || '';
 }
-async function changeDevTrackerSection(id, sectionId) {
+async function changeDevTrackerSection(id, input) {
+  const sectionId = resolveSectionInput_(input);
   await api('POST', '/api/dev-tracker', { id, sectionId: sectionId || null });
   loadDevTracker();
 }
@@ -1518,7 +1554,9 @@ function renderDevTrackerCard(item) {
           ? `<button class="btn" onclick="toggleDevTrackerStatus('${item.id}','backlog')">↩ Back to backlog</button>`
           : `<button class="btn btn-primary" onclick="toggleDevTrackerStatus('${item.id}','done')">✓ Mark done</button>`}
         <button class="btn" onclick="deleteDevTrackerCard('${item.id}')">Delete</button>
-        <select style="font-size:12px;" onchange="changeDevTrackerSection('${item.id}', this.value)">${sectionOptionsHtml_(item.section_id)}</select>
+        <input type="text" list="dtSectionList" autocomplete="off" placeholder="No section" style="font-size:12px;width:200px;"
+          value="${esc(_sectionIdToLabel.get(item.section_id) || '')}"
+          onchange="changeDevTrackerSection('${item.id}', this)">
       </div>
     </div>
   `;
@@ -1541,12 +1579,13 @@ async function addDevTrackerCard() {
   const priority = document.getElementById('dtNewPriority').value;
   const category = document.getElementById('dtNewCategory').value.trim();
   const description = document.getElementById('dtNewDesc').value.trim();
-  const sectionId = document.getElementById('dtNewSection').value || null;
+  const sectionInput = document.getElementById('dtNewSection');
+  const sectionId = resolveSectionInput_(sectionInput) || null;
   await api('POST', '/api/dev-tracker', { title, priority, category, description, sectionId });
   document.getElementById('dtNewTitle').value = '';
   document.getElementById('dtNewDesc').value = '';
   document.getElementById('dtNewCategory').value = '';
-  document.getElementById('dtNewSection').value = '';
+  sectionInput.value = '';
   loadDevTracker();
 }
 
