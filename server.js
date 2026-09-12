@@ -594,7 +594,7 @@ async function initDB() {
           await client.query(
             `INSERT INTO dev_tracker (title, description, status, category, section_id, seed_key, completed_at, completed_by)
              VALUES ($1,$2,$3,'Seed',$4,$5,$6,$7)
-             ON CONFLICT (seed_key) DO NOTHING`,
+             ON CONFLICT (seed_key) WHERE seed_key IS NOT NULL DO NOTHING`,
             [card.title, card.description, card.status, sectionId, card.seedKey, done ? new Date().toISOString() : null, done ? 'Seed' : '']
           );
           cardCount++;
