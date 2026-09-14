@@ -134,6 +134,20 @@
   .filters { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 20px; align-items: center; }
   .filters input[type=text] { flex: 1; min-width: 180px; }
   .filters select { min-width: 120px; }
+  .filters .section-picker { flex: 1; min-width: 180px; }
+
+  /* ── Section picker (searchable, tap-to-browse dropdown) ──── */
+  .section-picker { position: relative; }
+  .section-picker input[type=text] { width: 100%; }
+  .section-picker-list {
+    position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 200;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    box-shadow: var(--shadow); max-height: 260px; overflow-y: auto;
+  }
+  .section-picker-opt { padding: 10px 12px; font-size: 13px; color: var(--text); cursor: pointer; }
+  .section-picker-opt:hover { background: var(--accent-light); }
+  .section-picker-opt.section-picker-empty { color: var(--muted); cursor: default; }
+  .section-picker-opt.section-picker-empty:hover { background: transparent; }
 
   /* ── Ticket List ────────────────── */
   .ticket-row { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--border); cursor: pointer; transition: .1s; }
@@ -218,7 +232,7 @@
     .ticket-header { flex-direction: column; }
     .ticket-actions { width: 100%; }
     .filters { flex-direction: column; }
-    .filters input[type=text], .filters select { width: 100%; min-width: unset; }
+    .filters input[type=text], .filters select, .filters .section-picker { width: 100%; min-width: unset; }
     .page-title { font-size: 18px; }
     .login-card { padding: 24px; }
 
@@ -378,9 +392,12 @@
           <input type="text" id="dtNewTitle" placeholder="Title" style="flex:1;min-width:200px;">
           <select id="dtNewPriority"><option value="low">Low</option><option value="normal" selected>Normal</option><option value="high">High</option></select>
           <input type="text" id="dtNewCategory" placeholder="Category (optional)" style="width:160px;">
-          <input type="text" id="dtNewSection" list="dtSectionList" placeholder="Search section (optional)..." autocomplete="off" oninput="resolveSectionInput_(this)" style="width:240px;">
+          <div class="section-picker">
+            <input type="text" id="dtNewSection" placeholder="Search or tap to browse section..." autocomplete="off"
+              oninput="filterSectionInput_(this)" onfocus="openSectionPicker_(this)" onblur="closeSectionPickerDelayed_(this)">
+            <div class="section-picker-list" id="dtNewSectionPickerList" hidden onmousedown="event.preventDefault();handleSectionPickerClick_(event,'dtNewSection')"></div>
+          </div>
         </div>
-        <datalist id="dtSectionList"></datalist>
         <textarea id="dtNewDesc" placeholder="Description (optional)" style="width:100%;min-height:50px;margin-bottom:8px;"></textarea>
         <button class="btn btn-primary" onclick="addDevTrackerCard()">Add to Backlog</button>
       </div>
@@ -404,7 +421,11 @@
         <div style="font-weight:700;font-size:13px;margin-bottom:10px;">Add a section</div>
         <div class="filters">
           <input type="text" id="tsNewLabel" placeholder="New section name" style="flex:1;min-width:160px;">
-          <input type="text" id="tsNewParent" list="dtSectionList" autocomplete="off" placeholder="Parent (blank = top-level)" style="width:240px;">
+          <div class="section-picker">
+            <input type="text" id="tsNewParent" autocomplete="off" placeholder="Parent (blank = top-level)"
+              oninput="filterSectionInput_(this)" onfocus="openSectionPicker_(this)" onblur="closeSectionPickerDelayed_(this)">
+            <div class="section-picker-list" id="tsNewParentPickerList" hidden onmousedown="event.preventDefault();handleSectionPickerClick_(event,'tsNewParent')"></div>
+          </div>
           <button class="btn btn-primary" onclick="addTreeSection_()">Add section</button>
         </div>
       </div>
@@ -1500,9 +1521,6 @@ async function ensureTreeSections_() {
     _sectionIdToLabel.set(s.id, label);
     _sectionLabelToId.set(label, s.id);
   });
-  const datalist = document.getElementById('dtSectionList');
-  if (datalist) datalist.innerHTML = Array.from(_sectionLabelToId.keys()).map(l => `<option value="${esc(l)}">`).join('');
-
   return _treeSectionsCache;
 }
 // Shared by both section-search inputs (new-card form and per-card picker):
@@ -1522,6 +1540,52 @@ function resolveSectionInput_(input) {
   }
   input.dataset.sectionId = match || '';
   return match || '';
+}
+// ── Section picker dropdown: a tap-to-browse-all list under the input,
+// filtered as you type. Plain <datalist> is what these used to be, but iOS
+// Safari all but ignores it (no dropdown affordance at all), so on mobile
+// typing was the *only* way to find a section -- this replaces it with a
+// real element we control that opens on focus and lists everything. ──
+function sectionPickerListEl_(input) {
+  return document.getElementById(input.id + 'PickerList');
+}
+function renderSectionPickerOptions_(input) {
+  const listEl = sectionPickerListEl_(input);
+  if (!listEl || !_sectionLabelToId) return;
+  const q = input.value.trim().toLowerCase();
+  const labels = Array.from(_sectionLabelToId.keys());
+  const matches = q ? labels.filter(l => l.toLowerCase().includes(q)) : labels;
+  listEl.innerHTML = matches.length
+    ? matches.map(l => `<div class="section-picker-opt" data-label="${esc(l)}" data-id="${esc(_sectionLabelToId.get(l))}">${esc(l)}</div>`).join('')
+    : '<div class="section-picker-opt section-picker-empty">No matching sections</div>';
+}
+function openSectionPicker_(input) {
+  const listEl = sectionPickerListEl_(input);
+  if (!listEl) return;
+  renderSectionPickerOptions_(input);
+  listEl.hidden = false;
+}
+function filterSectionInput_(input) {
+  resolveSectionInput_(input);
+  renderSectionPickerOptions_(input);
+  const listEl = sectionPickerListEl_(input);
+  if (listEl) listEl.hidden = false;
+}
+function closeSectionPickerDelayed_(input) {
+  const listEl = sectionPickerListEl_(input);
+  if (!listEl) return;
+  setTimeout(() => { listEl.hidden = true; }, 150);
+}
+function handleSectionPickerClick_(ev, inputId) {
+  const opt = ev.target.closest('.section-picker-opt');
+  if (!opt || opt.dataset.label === undefined) return;
+  const input = document.getElementById(inputId);
+  if (!input) return;
+  input.value = opt.dataset.label;
+  input.dataset.sectionId = opt.dataset.id || '';
+  const listEl = sectionPickerListEl_(input);
+  if (listEl) listEl.hidden = true;
+  input.dispatchEvent(new Event('change'));
 }
 async function changeDevTrackerSection(id, input) {
   const sectionId = resolveSectionInput_(input);
@@ -1562,9 +1626,13 @@ function renderDevTrackerCard(item) {
           ? `<button class="btn" onclick="toggleDevTrackerStatus('${item.id}','backlog')">↩ Back to backlog</button>`
           : `<button class="btn btn-primary" onclick="toggleDevTrackerStatus('${item.id}','done')">✓ Mark done</button>`}
         <button class="btn" onclick="deleteDevTrackerCard('${item.id}')">Delete</button>
-        <input type="text" list="dtSectionList" autocomplete="off" placeholder="No section" style="font-size:12px;width:200px;"
-          value="${esc(_sectionIdToLabel.get(item.section_id) || '')}"
-          onchange="changeDevTrackerSection('${item.id}', this)">
+        <div class="section-picker" style="width:200px;">
+          <input type="text" id="dtSection_${item.id}" autocomplete="off" placeholder="No section" style="font-size:12px;"
+            value="${esc(_sectionIdToLabel.get(item.section_id) || '')}"
+            oninput="filterSectionInput_(this)" onfocus="openSectionPicker_(this)" onblur="closeSectionPickerDelayed_(this)"
+            onchange="changeDevTrackerSection('${item.id}', this)">
+          <div class="section-picker-list" id="dtSection_${item.id}PickerList" hidden onmousedown="event.preventDefault();handleSectionPickerClick_(event,'dtSection_${item.id}')"></div>
+        </div>
       </div>
     </div>
   `;
