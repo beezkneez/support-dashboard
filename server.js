@@ -445,6 +445,40 @@ async function initDB() {
     // communicated) doesn't depend on the dev_tracker card surviving unedited.
     await client.query(`ALTER TABLE feature_requests ADD COLUMN IF NOT EXISTS timeline_note TEXT DEFAULT ''`).catch(()=>{});
 
+    // Two-way thread on a feature request, same shape as ticket_messages --
+    // lets an admin ask a clarifying question instead of only ever being able
+    // to move it or leave it. Kept as its own table (not folded into
+    // ticket_messages) because a feature request isn't a ticket: no status
+    // machine, no forwarding, and it needs to survive independently of
+    // whether the request has been moved onto dev_tracker.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS feature_request_messages (
+        id                 SERIAL PRIMARY KEY,
+        feature_request_id TEXT REFERENCES feature_requests(id) ON DELETE CASCADE,
+        sender_type        TEXT NOT NULL,
+        sender_name        TEXT,
+        sender_email       TEXT,
+        body               TEXT NOT NULL,
+        image_url          TEXT,
+        source             TEXT DEFAULT 'app',
+        created_at         TIMESTAMPTZ DEFAULT NOW()
+      )
+    `).catch(()=>{});
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_feature_request_messages_fr ON feature_request_messages (feature_request_id, created_at)`).catch(()=>{});
+
+    // Internal notes on a feature request, same shape as ticket_notes -- for
+    // context an admin wants to leave for themselves without it ever going
+    // to the requester.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS feature_request_notes (
+        id                 SERIAL PRIMARY KEY,
+        feature_request_id TEXT REFERENCES feature_requests(id) ON DELETE CASCADE,
+        admin_id           INTEGER REFERENCES admin_users(id),
+        body               TEXT NOT NULL,
+        created_at         TIMESTAMPTZ DEFAULT NOW()
+      )
+    `).catch(()=>{});
+
     // Dev Tracker — the actual working backlog. A near-exact port of the
     // Kanban that used to live inside Aradia's own admin, moved here because
     // every spawn feeds it, not just Aradia. `source_request_id` links a card
@@ -940,6 +974,86 @@ app.post('/api/hooks/ticketExtReply', requireApiKey, async (req, res) => {
     res.json({ ok: true });
   } catch(e) {
     console.error('[hooks/ticketExtReply]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+// User replies to a feature request (called by the source app, by dashboard id)
+app.post('/api/hooks/featureRequest/:id/reply', requireApiKey, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { fromEmail, fromName, body } = req.body;
+    if (!body) return res.json({ ok: false, reason: 'body required' });
+
+    const fr = await pool.query('SELECT * FROM feature_requests WHERE id=$1 AND app_id=$2', [id, req.app.id]);
+    if (fr.rows.length === 0) return res.json({ ok: false, reason: 'Feature request not found' });
+
+    await pool.query(
+      `INSERT INTO feature_request_messages (feature_request_id, sender_type, sender_name, sender_email, body, source)
+       VALUES ($1,'user',$2,$3,$4,'app')`,
+      [id, fromName || fromEmail, fromEmail, body]
+    );
+    await pool.query(`UPDATE feature_requests SET updated_at=NOW() WHERE id=$1`, [id]);
+
+    pushToAdmins(
+      '💡 Reply · ' + req.app.name,
+      (fromName || fromEmail) + ': ' + body,
+      '/', 'reply'
+    );
+    sendMail({
+      to: process.env.ADMIN_EMAIL,
+      subject: `[${req.app.name}] Reply on: ${fr.rows[0].title || '(no title)'}`,
+      html: `
+        <div style="font-family:sans-serif;max-width:600px;margin:0 auto;">
+          <div style="background:${req.app.color};color:#fff;padding:16px 20px;border-radius:8px 8px 0 0;">
+            <strong>${req.app.name}</strong> — User replied to feature request
+          </div>
+          <div style="border:1px solid #e5e7eb;border-top:0;padding:20px;border-radius:0 0 8px 8px;">
+            <p><strong>From:</strong> ${fromName || ''} &lt;${fromEmail}&gt;</p>
+            <p><strong>Feature request:</strong> ${fr.rows[0].title || '(none)'}</p>
+            <hr style="border:0;border-top:1px solid #e5e7eb;margin:16px 0;">
+            <div style="white-space:pre-wrap;">${body}</div>
+          </div>
+        </div>
+      `,
+      replyTo: fromEmail
+    });
+
+    res.json({ ok: true });
+  } catch(e) {
+    console.error('[hooks/featureRequest/:id/reply]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+// User reply forwarded from the source app, keyed by external_id (the app's own feature-request id).
+app.post('/api/hooks/featureRequestExtReply', requireApiKey, async (req, res) => {
+  try {
+    const { externalId, fromEmail, fromName, body } = req.body;
+    if (!externalId || !body) return res.json({ ok: false, reason: 'externalId and body required' });
+    const fr = await pool.query('SELECT * FROM feature_requests WHERE external_id=$1 AND app_id=$2', [externalId, req.app.id]);
+    if (fr.rows.length === 0) return res.json({ ok: false, reason: 'Feature request not found' });
+    const id = fr.rows[0].id;
+    await pool.query(
+      `INSERT INTO feature_request_messages (feature_request_id, sender_type, sender_name, sender_email, body, source)
+       VALUES ($1,'user',$2,$3,$4,'app')`,
+      [id, fromName || fromEmail, fromEmail, body]
+    );
+    await pool.query(`UPDATE feature_requests SET updated_at=NOW() WHERE id=$1`, [id]);
+    pushToAdmins(
+      '💡 Reply · ' + req.app.name,
+      (fromName || fromEmail) + ': ' + body,
+      '/', 'reply'
+    );
+    sendMail({
+      to: process.env.ADMIN_EMAIL,
+      subject: `[${req.app.name}] Reply on: ${fr.rows[0].title || '(no title)'}`,
+      html: `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;"><p><strong>${fromName || ''}</strong> &lt;${fromEmail}&gt; replied:</p><div style="white-space:pre-wrap;background:#f9fafb;padding:12px;border-radius:6px;">${body}</div></div>`,
+      replyTo: fromEmail
+    });
+    res.json({ ok: true });
+  } catch(e) {
+    console.error('[hooks/featureRequestExtReply]', e);
     res.json({ ok: false, reason: 'Server error' });
   }
 });
@@ -1744,6 +1858,143 @@ app.get('/api/requests', requireAdmin, async (req, res) => {
     res.json({ ok: true, requests: result.rows });
   } catch(e) {
     console.error('[requests]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+// Get a single request with its message thread and internal notes
+app.get('/api/requests/:id', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const request = await pool.query(
+      `SELECT fr.*, a.name AS app_name, a.color AS app_color
+       FROM feature_requests fr LEFT JOIN apps a ON a.id = fr.app_id WHERE fr.id=$1`,
+      [id]
+    );
+    if (request.rows.length === 0) return res.json({ ok: false, reason: 'Not found' });
+
+    const messages = await pool.query(
+      `SELECT * FROM feature_request_messages WHERE feature_request_id=$1 ORDER BY created_at ASC`,
+      [id]
+    );
+    const notes = await pool.query(
+      `SELECT n.*, u.name as admin_name FROM feature_request_notes n
+       LEFT JOIN admin_users u ON u.id=n.admin_id
+       WHERE n.feature_request_id=$1 ORDER BY n.created_at ASC`,
+      [id]
+    );
+
+    res.json({ ok: true, request: request.rows[0], messages: messages.rows, notes: notes.rows });
+  } catch(e) {
+    console.error('[requests/:id]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+// Admin replies to a feature request. Unlike the ticket reply callback, this
+// one is AWAITED and its response checked -- same reasoning as notifySpawn
+// below: a fire-and-forget callback here would let a reply look sent when
+// the spawn never got it, and a requester's question would go unanswered
+// with nothing to say so. Falls back to emailing the requester directly
+// whenever the callback is missing, unreachable, or fails.
+app.post('/api/requests/:id/reply', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { body, imageUrl } = req.body;
+    if (!body) return res.json({ ok: false, reason: 'body required' });
+    const shot = imageUrl && /^(https?:\/\/|data:image\/)/i.test(imageUrl) ? imageUrl : null;
+
+    const fr = (await pool.query(
+      `SELECT fr.*, a.name AS app_name, a.color AS app_color, a.api_key AS app_api_key, a.callback_url AS app_callback_url
+       FROM feature_requests fr LEFT JOIN apps a ON a.id = fr.app_id WHERE fr.id=$1`,
+      [id]
+    )).rows[0];
+    if (!fr) return res.json({ ok: false, reason: 'Not found' });
+
+    await pool.query(
+      `INSERT INTO feature_request_messages (feature_request_id, sender_type, sender_name, sender_email, body, source, image_url)
+       VALUES ($1,'admin',$2,$3,$4,'dashboard',$5)`,
+      [id, req.admin.name || req.admin.email, req.admin.email, body, shot]
+    );
+    await pool.query(`UPDATE feature_requests SET updated_at=NOW() WHERE id=$1`, [id]);
+
+    const callbackBase = fr.callback_url || fr.app_callback_url;
+    let delivered = false, deliverError = null;
+
+    if (callbackBase && fr.external_id && fr.app_api_key) {
+      try {
+        const resp = await fetch(callbackBase.replace(/\/$/, '') + '/api/hooks/featureRequestReply', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-API-Key': fr.app_api_key },
+          body: JSON.stringify({
+            externalId: fr.external_id,
+            body,
+            imageUrl: shot,
+            senderName: req.admin.name || 'Support',
+            senderEmail: req.admin.email || ''
+          }),
+          signal: AbortSignal.timeout(10000),
+        });
+        const text = await resp.text().catch(() => '');
+        let parsed; try { parsed = JSON.parse(text); } catch(_) { parsed = null; }
+        if (resp.ok && parsed && parsed.ok === true) {
+          delivered = true;
+        } else {
+          deliverError = !resp.ok ? `Spawn returned HTTP ${resp.status}` : 'Spawn accepted the call but reported failure.';
+          console.error(`[requests/reply→app callback] ${callbackBase} ${deliverError}: ${text.slice(0,300)}`);
+        }
+      } catch(err) {
+        deliverError = err.message || 'Network error reaching the spawn.';
+        console.error('[requests/reply→app callback]', callbackBase, err.message);
+      }
+    } else {
+      deliverError = 'Missing callback_url, external_id, or app_api_key on this request.';
+    }
+
+    // Never let a reply go silently unheard -- if it didn't land in-app,
+    // it goes to the requester's inbox directly instead.
+    if (!delivered) {
+      sendMail({
+        to: fr.from_email,
+        subject: `Re: ${fr.title || 'Your feature request'} — ${fr.app_name || 'Support'}`,
+        html: `
+          <div style="font-family:sans-serif;max-width:600px;margin:0 auto;">
+            <div style="background:${fr.app_color || '#6366f1'};color:#fff;padding:16px 20px;border-radius:8px 8px 0 0;">
+              <strong>${fr.app_name || 'Support'}</strong> — Reply to your feature request
+            </div>
+            <div style="border:1px solid #e5e7eb;border-top:0;padding:20px;border-radius:0 0 8px 8px;">
+              <p>Hi ${fr.from_name || 'there'},</p>
+              <div style="white-space:pre-wrap;margin:16px 0;padding:16px;background:#f9fafb;border-radius:6px;">${body}</div>
+              ${shot ? `<img src="${shot}" alt="screenshot" style="max-width:100%;border-radius:6px;border:1px solid #e5e7eb;margin-bottom:16px;">` : ''}
+              <hr style="border:0;border-top:1px solid #e5e7eb;margin:16px 0;">
+              <p style="color:#6b7280;font-size:14px;">Simply reply to this email to respond.</p>
+            </div>
+          </div>
+        `,
+        replyTo: process.env.ADMIN_EMAIL
+      });
+    }
+
+    res.json({ ok: true, delivered: delivered ? 'app' : 'email', deliverError: delivered ? null : deliverError });
+  } catch(e) {
+    console.error('[requests/reply]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+// Internal note on a feature request -- never sent to the requester.
+app.post('/api/requests/:id/note', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { body } = req.body;
+    if (!body) return res.json({ ok: false, reason: 'body required' });
+    await pool.query(
+      `INSERT INTO feature_request_notes (feature_request_id, admin_id, body) VALUES ($1,$2,$3)`,
+      [id, req.admin.id, body]
+    );
+    res.json({ ok: true });
+  } catch(e) {
+    console.error('[requests/notes]', e);
     res.json({ ok: false, reason: 'Server error' });
   }
 });

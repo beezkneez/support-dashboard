@@ -1359,12 +1359,20 @@ function renderRequestList(requests) {
   `).join('');
 }
 
-function openRequest(id) {
-  const req = _requestsCache.find(r => r.id === id);
-  if (!req) return;
+async function openRequest(id) {
   showPage('requestDetail');
+  const el = document.getElementById('requestDetail');
+  el.innerHTML = '<p style="color:var(--muted);">Loading...</p>';
+
+  const r = await api('GET', '/api/requests/' + id);
+  if (!r.ok) { el.innerHTML = '<p>Failed to load request.</p>'; return; }
+
+  const req = r.request;
+  const msgs = r.messages;
+  const notes = r.notes;
   const alreadyMoved = req.status === 'moved';
-  document.getElementById('requestDetail').innerHTML = `
+
+  el.innerHTML = `
     <div class="card">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:10px;">
         <h2 style="margin:0;">${esc(req.title)}</h2>
@@ -1420,7 +1428,121 @@ function openRequest(id) {
         </div>
       `}
     </div>
+
+    <div class="message-thread">
+      ${msgs.map(m => {
+        const shot = m.image_url && /^(https?:\/\/|data:image\/)/i.test(m.image_url) ? m.image_url : '';
+        return `
+        <div class="msg-bubble ${m.sender_type}">
+          <div class="msg-header">
+            <span class="sender ${m.sender_type === 'admin' ? 'admin-sender' : ''}">${esc(m.sender_name || m.sender_email || m.sender_type)}</span>
+            <span class="time">${new Date(m.created_at).toLocaleString()}</span>
+          </div>
+          <div class="msg-body">${esc(m.body)}</div>
+          ${shot ? `<a href="${shot}" target="_blank" rel="noopener"><img class="kora-ctx-shot" src="${shot}" alt="attached screenshot"></a>` : ''}
+          ${m.source !== 'app' ? `<div class="msg-source">via ${m.source}</div>` : ''}
+        </div>
+      `;}).join('')}
+    </div>
+
+    ${notes.length > 0 ? `
+      <h4 style="margin-bottom:8px;color:var(--muted);font-size:13px;">Internal Notes</h4>
+      ${notes.map(n => `
+        <div class="note-bubble">
+          <div class="note-header">${esc(n.admin_name || 'Admin')} &middot; ${new Date(n.created_at).toLocaleString()}</div>
+          ${esc(n.body)}
+        </div>
+      `).join('')}
+    ` : ''}
+
+    <div class="reply-box">
+      <div class="tabs">
+        <div class="tab active" onclick="switchRequestReplyTab(this,'reply')">Message Requester</div>
+        <div class="tab" onclick="switchRequestReplyTab(this,'note')">Internal Note</div>
+      </div>
+      <textarea id="requestReplyBody" placeholder="Ask a question or leave an update..." onpaste="handleRequestReplyPaste(event)"></textarea>
+      <div id="requestReplyShotPreview" class="reply-shot-preview hidden">
+        <img id="requestReplyShotImg" src="" alt="attached screenshot">
+        <button type="button" class="btn btn-ghost btn-sm" onclick="clearRequestReplyShot()">Remove</button>
+      </div>
+      <div class="actions">
+        <button class="btn btn-primary" id="requestReplyBtn" onclick="sendRequestReply('${req.id}')">Send Message</button>
+        <button class="btn btn-ghost hidden" id="requestNoteBtn" onclick="sendRequestNote('${req.id}')">Add Note</button>
+        <label class="btn btn-ghost btn-sm" id="requestReplyShotLabel" style="cursor:pointer;">
+          📎 Attach screenshot
+          <input type="file" id="requestReplyShotInput" accept="image/*" class="hidden" onchange="handleRequestReplyShotInput(event)">
+        </label>
+      </div>
+    </div>
   `;
+  requestReplyShotDataUrl = null;
+}
+
+// Screenshot to attach to the next feature-request message/reply — same
+// paste-or-file-picker-to-data-URL flow as ticket replies (no upload
+// endpoint; the string travels the same way feature_request_messages.image_url does).
+let requestReplyShotDataUrl = null;
+
+function setRequestReplyShot(dataUrl) {
+  requestReplyShotDataUrl = dataUrl;
+  document.getElementById('requestReplyShotImg').src = dataUrl;
+  document.getElementById('requestReplyShotPreview').classList.remove('hidden');
+}
+
+function clearRequestReplyShot() {
+  requestReplyShotDataUrl = null;
+  document.getElementById('requestReplyShotInput').value = '';
+  document.getElementById('requestReplyShotPreview').classList.add('hidden');
+}
+
+function handleRequestReplyShotInput(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => setRequestReplyShot(reader.result);
+  reader.readAsDataURL(file);
+}
+
+function handleRequestReplyPaste(event) {
+  const item = Array.from(event.clipboardData?.items || []).find(i => i.type.startsWith('image/'));
+  if (!item) return;
+  event.preventDefault();
+  const reader = new FileReader();
+  reader.onload = () => setRequestReplyShot(reader.result);
+  reader.readAsDataURL(item.getAsFile());
+}
+
+let requestReplyMode = 'reply';
+function switchRequestReplyTab(el, mode) {
+  requestReplyMode = mode;
+  el.parentElement.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('requestReplyBody').placeholder = mode === 'reply' ? 'Ask a question or leave an update...' : 'Add an internal note...';
+  document.getElementById('requestReplyBtn').classList.toggle('hidden', mode === 'note');
+  document.getElementById('requestNoteBtn').classList.toggle('hidden', mode === 'reply');
+  document.getElementById('requestReplyShotLabel').classList.toggle('hidden', mode === 'note');
+  if (mode === 'note') clearRequestReplyShot();
+}
+
+async function sendRequestReply(id) {
+  const body = document.getElementById('requestReplyBody').value.trim();
+  if (!body) return;
+  const r = await api('POST', `/api/requests/${id}/reply`, { body, imageUrl: requestReplyShotDataUrl });
+  if (r.ok) {
+    openRequest(id);
+    if (r.delivered === 'email') {
+      setTimeout(() => alert('Could not reach the app in-app — sent by email instead.' + (r.deliverError ? ' (' + r.deliverError + ')' : '')), 200);
+    }
+  } else {
+    alert(r.reason || 'Failed');
+  }
+}
+
+async function sendRequestNote(id) {
+  const body = document.getElementById('requestReplyBody').value.trim();
+  if (!body) return;
+  const r = await api('POST', `/api/requests/${id}/note`, { body });
+  if (r.ok) { openRequest(id); } else { alert(r.reason || 'Failed'); }
 }
 
 async function submitMove(id) {

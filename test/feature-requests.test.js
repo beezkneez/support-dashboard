@@ -100,5 +100,64 @@ const ok = (c, label, detail) => {
   ok(/status === 'moved'/.test(hook), "refuses to re-move a request that already has a dev_tracker card");
 }
 
+// ── Two-way messaging: storage ────────────────────────────────────────
+{
+  ok(/CREATE TABLE IF NOT EXISTS feature_request_messages/.test(server), "feature_request_messages table exists");
+  ok(/CREATE TABLE IF NOT EXISTS feature_request_notes/.test(server), "feature_request_notes table exists");
+}
+
+// ── Two-way messaging: single-request fetch ───────────────────────────
+{
+  const i = server.indexOf("app.get('/api/requests/:id'");
+  ok(i >= 0, "found GET /api/requests/:id");
+  ok(/requireAdmin/.test(server.slice(i, i + 60)), "single-request fetch requires an authenticated admin");
+  const hook = server.slice(i, server.indexOf("app.post('/api/requests/:id/reply'"));
+  ok(/FROM feature_request_messages/.test(hook), "returns the message thread");
+  ok(/FROM feature_request_notes/.test(hook), "returns the internal notes");
+}
+
+// ── Two-way messaging: admin reply is awaited/checked, not fire-and-forget ─
+// Mirrors the same fix notifySpawn already needed: a reply that only LOOKS
+// sent (fire-and-forget callback, no check of the real outcome) leaves a
+// requester's question unanswered with nothing anywhere to say so.
+{
+  const i = server.indexOf("app.post('/api/requests/:id/reply'");
+  ok(i >= 0, "found POST /api/requests/:id/reply");
+  ok(/requireAdmin/.test(server.slice(i, i + 60)), "reply endpoint requires an authenticated admin");
+  const hook = server.slice(i, server.indexOf("app.post('/api/requests/:id/note'"));
+  ok(/INSERT INTO feature_request_messages/.test(hook), "stores the admin's message");
+  ok(/sender_type='admin'|'admin',\$2/.test(hook), "stores it as an admin-authored message");
+  ok(/await fetch\(/.test(hook), "the callback to the spawn is awaited, not fire-and-forget");
+  ok(/AbortSignal\.timeout\(/.test(hook), "the awaited callback has a timeout");
+  ok(/resp\.ok && parsed && parsed\.ok === true/.test(hook), "checks both HTTP status and response body before treating it as delivered");
+  ok(/if \(!delivered\)/.test(hook) && /sendMail\(/.test(hook), "falls back to emailing the requester directly when the callback wasn't confirmed");
+}
+
+// ── Two-way messaging: internal notes never reach the requester ──────────
+{
+  const i = server.indexOf("app.post('/api/requests/:id/note'");
+  ok(i >= 0, "found POST /api/requests/:id/note");
+  ok(/requireAdmin/.test(server.slice(i, i + 60)), "note endpoint requires an authenticated admin");
+  const hook = server.slice(i, server.indexOf("app.post('/api/requests/:id/move'"));
+  ok(/INSERT INTO feature_request_notes/.test(hook), "stores the note");
+  ok(!/sendMail\(/.test(hook) && !/fetch\(/.test(hook), "never emails or calls back the requester for an internal note");
+}
+
+// ── Two-way messaging: inbound replies from the spawn ─────────────────
+{
+  const byId = server.indexOf("app.post('/api/hooks/featureRequest/:id/reply'");
+  ok(byId >= 0, "found the by-id inbound reply hook");
+  ok(/requireApiKey/.test(server.slice(byId, byId + 90)), "by-id inbound hook is behind requireApiKey");
+
+  const byExt = server.indexOf("app.post('/api/hooks/featureRequestExtReply'");
+  ok(byExt >= 0, "found the by-externalId inbound reply hook");
+  ok(/requireApiKey/.test(server.slice(byExt, byExt + 60)), "by-externalId inbound hook is behind requireApiKey");
+
+  const hook = server.slice(byId, byExt > byId ? byExt : byId + 3000);
+  ok(/INSERT INTO feature_request_messages/.test(hook), "inbound reply is stored in the thread");
+  ok(/'user'/.test(hook), "stored as a user-authored message");
+  ok(/pushToAdmins/.test(hook), "pushes the admin so a reply doesn't sit unseen");
+}
+
 console.log(fails ? "\n" + fails + " failure(s)" : "\nall passed");
 process.exit(fails ? 1 : 0);
