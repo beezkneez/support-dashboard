@@ -197,6 +197,9 @@
   .reply-box .tab:last-child { border-radius: 0 8px 8px 0; }
   .reply-box .tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
   .reply-box .actions { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+  .reply-mode-hint { font-size: 12px; margin: -6px 0 10px; }
+  .reply-mode-hint.mode-reply { color: var(--success); }
+  .reply-mode-hint.mode-note { color: var(--muted); }
   .reply-shot-preview { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
   .reply-shot-preview img { max-width: 140px; max-height: 100px; border-radius: 8px; border: 1px solid var(--border); }
 
@@ -982,6 +985,7 @@ async function openTicket(id) {
   const t = r.ticket;
   const msgs = r.messages;
   const notes = r.notes;
+  replyToName = esc(t.from_name || t.from_email);
 
   el.innerHTML = `
     <div class="ticket-header">
@@ -1052,6 +1056,7 @@ async function openTicket(id) {
         <div class="tab active" onclick="switchReplyTab(this,'reply')">Reply to User</div>
         <div class="tab" onclick="switchReplyTab(this,'note')">Internal Note</div>
       </div>
+      <div class="reply-mode-hint mode-reply" id="replyModeHint">📨 Sends to ${esc(t.from_name || t.from_email)} now, with a notification.</div>
       <textarea id="replyBody" placeholder="Type your reply..." onpaste="handleReplyPaste(event)"></textarea>
       <div id="replyShotPreview" class="reply-shot-preview hidden">
         <img id="replyShotImg" src="" alt="attached screenshot">
@@ -1106,6 +1111,7 @@ function handleReplyPaste(event) {
 }
 
 let replyMode = 'reply';
+let replyToName = '';
 function switchReplyTab(el, mode) {
   replyMode = mode;
   el.parentElement.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -1114,6 +1120,11 @@ function switchReplyTab(el, mode) {
   document.getElementById('replyBtn').classList.toggle('hidden', mode === 'note');
   document.getElementById('noteBtn').classList.toggle('hidden', mode === 'reply');
   document.getElementById('replyShotLabel').classList.toggle('hidden', mode === 'note');
+  const hint = document.getElementById('replyModeHint');
+  hint.className = 'reply-mode-hint mode-' + mode;
+  hint.textContent = mode === 'reply'
+    ? `📨 Sends to ${replyToName} now, with a notification.`
+    : `🔒 Internal only — ${replyToName} will not see this.`;
   if (mode === 'note') clearReplyShot();
 }
 
@@ -1371,6 +1382,7 @@ async function openRequest(id) {
   const msgs = r.messages;
   const notes = r.notes;
   const alreadyMoved = req.status === 'moved';
+  requestReplyName = esc(req.from_name || req.from_email);
 
   el.innerHTML = `
     <div class="card">
@@ -1460,6 +1472,7 @@ async function openRequest(id) {
         <div class="tab active" onclick="switchRequestReplyTab(this,'reply')">Message Requester</div>
         <div class="tab" onclick="switchRequestReplyTab(this,'note')">Internal Note</div>
       </div>
+      <div class="reply-mode-hint mode-reply" id="requestReplyModeHint">📨 Sends to ${esc(req.from_name || req.from_email)} now, with a notification.</div>
       <textarea id="requestReplyBody" placeholder="Ask a question or leave an update..." onpaste="handleRequestReplyPaste(event)"></textarea>
       <div id="requestReplyShotPreview" class="reply-shot-preview hidden">
         <img id="requestReplyShotImg" src="" alt="attached screenshot">
@@ -1513,6 +1526,7 @@ function handleRequestReplyPaste(event) {
 }
 
 let requestReplyMode = 'reply';
+let requestReplyName = '';
 function switchRequestReplyTab(el, mode) {
   requestReplyMode = mode;
   el.parentElement.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -1522,6 +1536,11 @@ function switchRequestReplyTab(el, mode) {
   document.getElementById('requestNoteBtn').classList.toggle('hidden', mode === 'reply');
   document.getElementById('requestReplyShotLabel').classList.toggle('hidden', mode === 'note');
   if (mode === 'note') clearRequestReplyShot();
+  const hint = document.getElementById('requestReplyModeHint');
+  hint.className = 'reply-mode-hint mode-' + mode;
+  hint.textContent = mode === 'reply'
+    ? `📨 Sends to ${requestReplyName} now, with a notification.`
+    : `🔒 Internal only — ${requestReplyName} will not see this.`;
 }
 
 async function sendRequestReply(id) {
