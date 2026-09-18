@@ -293,6 +293,10 @@
         <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 2h8v12l-4-2-4 2z"/></svg>
         Changelog
       </a>
+      <a href="#" data-page="korahealth" onclick="showPage('korahealth')">
+        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="6" width="10" height="8" rx="2"/><path d="M8 6V3M6 3h4"/><circle cx="6" cy="10" r="1"/><circle cx="10" cy="10" r="1"/></svg>
+        Kora Health
+      </a>
       <a href="#" data-page="tenants" onclick="showPage('tenants')">
         <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h12M2 7h12M2 11h8"/><circle cx="14" cy="11" r="2"/></svg>
         Tenants
@@ -464,6 +468,16 @@
         </div>
       </div>
       <div id="changelogList" class="card" style="padding:0;overflow:hidden;"></div>
+    </div>
+
+    <!-- ── Kora Health Page ── -->
+    <div id="pageKoraHealth" class="hidden">
+      <h1 class="page-title">Kora Health</h1>
+      <div class="filters" style="margin-bottom:16px;">
+        <button class="btn" onclick="loadKoraHealth()">↻ Refresh</button>
+        <span style="font-size:12px;color:var(--muted);">Bad-answer feedback and knowledge-base drift, pulled live from every spawn that has a callback URL set.</span>
+      </div>
+      <div id="koraHealthList" class="card" style="padding:0;overflow:hidden;"></div>
     </div>
 
     <!-- ── Settings Page ── -->
@@ -735,7 +749,7 @@ async function doLogout() {
 
 // ── Navigation ─────────────────────────────────────────────────────
 function showPage(page) {
-  ['Dashboard', 'Tickets', 'TicketDetail', 'Requests', 'RequestDetail', 'DevTracker', 'DevTree', 'Changelog', 'Tenants', 'Settings'].forEach(p => {
+  ['Dashboard', 'Tickets', 'TicketDetail', 'Requests', 'RequestDetail', 'DevTracker', 'DevTree', 'Changelog', 'KoraHealth', 'Tenants', 'Settings'].forEach(p => {
     document.getElementById('page' + p).classList.add('hidden');
   });
   document.querySelectorAll('.sidebar nav a').forEach(a => a.classList.remove('active'));
@@ -770,6 +784,10 @@ function showPage(page) {
     document.getElementById('pageChangelog').classList.remove('hidden');
     document.querySelector('[data-page=changelog]').classList.add('active');
     loadChangelogApps_();
+  } else if (page === 'korahealth') {
+    document.getElementById('pageKoraHealth').classList.remove('hidden');
+    document.querySelector('[data-page=korahealth]').classList.add('active');
+    loadKoraHealth();
   } else if (page === 'tenants') {
     document.getElementById('pageTenants').classList.remove('hidden');
     document.querySelector('[data-page=tenants]').classList.add('active');
@@ -1198,6 +1216,43 @@ async function addApp() {
 // ── Tenants ────────────────────────────────────────────────────────
 let _tenants = [];
 let _editTenantId = null;
+
+// ── Kora Health ────────────────────────────────────────────────────
+async function loadKoraHealth() {
+  const el = document.getElementById('koraHealthList');
+  el.innerHTML = '<div class="empty-state"><h3>Checking every spawn…</h3></div>';
+  const r = await api('GET', '/api/koraHealth');
+  if (!r.ok) { el.innerHTML = '<div class="empty-state"><h3>Could not load.</h3></div>'; return; }
+  if (!r.apps.length) {
+    el.innerHTML = '<div class="empty-state"><h3>No spawns have a callback URL set yet.</h3><p>Add one under Settings -> Connected Apps.</p></div>';
+    return;
+  }
+  el.innerHTML = r.apps.map(a => {
+    if (!a.ok) {
+      return `
+        <div class="ticket-row">
+          <span class="app-dot" style="background:${a.color || '#6366f1'}"></span>
+          <div class="subject">${esc(a.name)}<span class="preview" style="color:var(--danger);">${esc(a.error || 'Unreachable')}</span></div>
+        </div>`;
+    }
+    const bad = a.bad || [], stale = a.driftStale || [];
+    const preview = bad.length
+      ? bad.slice(0, 2).map(b => esc((b.title || 'Chat').slice(0, 60))).join(' · ')
+      : 'No unhelpful answers this week';
+    return `
+      <div class="ticket-row">
+        <span class="app-dot" style="background:${a.color || '#6366f1'}"></span>
+        <div class="subject">
+          ${esc(a.name)}
+          <span class="preview">${preview}</span>
+        </div>
+        <div class="meta">
+          <span class="${a.badCount7d > 0 ? 'text-warn' : ''}">👎 ${a.badCount7d} this week</span>
+          <span class="${stale.length > 0 ? 'text-warn' : ''}" title="${stale.map(esc).join(', ')}">📚 ${stale.length} topic${stale.length === 1 ? '' : 's'} stale</span>
+        </div>
+      </div>`;
+  }).join('');
+}
 
 async function loadTenants() {
   const r = await api('GET', '/api/tenants');

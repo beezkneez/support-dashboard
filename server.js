@@ -2472,6 +2472,56 @@ app.post('/api/apps', requireAdmin, async (req, res) => {
   }
 });
 
+// ── Kora Health ──────────────────────────────────────────────────────
+// Pulls each spawn's bad-answer/KB-drift signal on demand (there is no
+// polling infra in this dashboard, and a live check is cheap enough not to
+// need one). Each spawn exposes this at /api/hooks/koraHealth, guarded by
+// the same shared X-API-Key every other hook here uses. One slow or
+// unreachable spawn must not blank out the rest, so this fetches all of them
+// in parallel and reports per-app success/failure rather than failing the
+// whole request.
+app.get('/api/koraHealth', requireAdmin, async (req, res) => {
+  try {
+    const q = await pool.query(
+      `SELECT id, name, slug, color, api_key, callback_url FROM apps
+        WHERE callback_url IS NOT NULL AND callback_url <> '' ORDER BY name`
+    );
+    const apps = await Promise.all(q.rows.map(async (a) => {
+      const base = { id: a.id, name: a.name, slug: a.slug, color: a.color };
+      let httpStatus = 0, raw = '', r;
+      try {
+        const resp = await fetch(a.callback_url.replace(/\/$/, '') + '/api/hooks/koraHealth', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-API-Key': a.api_key },
+          body: JSON.stringify({}),
+        });
+        httpStatus = resp.status;
+        raw = await resp.text();
+        if ((resp.headers.get('content-type') || '').includes('application/json')) {
+          try { r = JSON.parse(raw); } catch (_) { r = null; }
+        }
+      } catch (err) {
+        return { ...base, ok: false, error: 'Could not reach that studio (' + err.message + ').' };
+      }
+      if (!r) {
+        const looksLikeAnErrorPage = /^\s*<(!doctype|html)/i.test(raw);
+        const error = httpStatus === 404
+          ? 'That studio is on an older build that does not have this endpoint yet.'
+          : looksLikeAnErrorPage
+            ? 'That studio returned a web page instead of an answer (HTTP ' + httpStatus + ') -- probably restarting.'
+            : 'That studio gave an unreadable reply (HTTP ' + httpStatus + ').';
+        return { ...base, ok: false, error };
+      }
+      if (!r.ok) return { ...base, ok: false, error: r.reason || 'That studio refused the request.' };
+      return { ...base, ok: true, badCount7d: r.badCount7d || 0, bad: r.bad || [], driftStale: r.driftStale || [] };
+    }));
+    res.json({ ok: true, apps });
+  } catch (e) {
+    console.error('[koraHealth]', e.message);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
 // ── Tenants Management ──────────────────────────────────────────────
 // ── Kronara app directory: the list the mobile app reads ───────────────────
 // Public and unauthenticated on purpose — the app reads it before anyone logs
