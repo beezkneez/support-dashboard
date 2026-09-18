@@ -2035,7 +2035,7 @@ app.post('/api/requests/:id/move', requireAdmin, async (req, res) => {
     // the request went anywhere or came back an error. A staff member's
     // request sat "moved" here and "submitted" on their own app with nothing
     // anywhere to say the notification never landed.
-    const { notified, notifyError } = await notifySpawn(fr, movedAt, timelineNote);
+    const { notified, notifyError } = await notifySpawn(fr, 'moved', movedAt, timelineNote);
     await pool.query(`UPDATE feature_requests SET notified=$1, notify_error=$2 WHERE id=$3`, [notified, notifyError, fr.id]);
 
     res.json({ ok: true, cardId, notified, notifyError: notified ? null : notifyError });
@@ -2057,7 +2057,7 @@ app.post('/api/requests/:id/retry-notify', requireAdmin, async (req, res) => {
     if (!fr) return res.json({ ok: false, reason: 'Not found' });
     if (fr.status !== 'moved') return res.json({ ok: false, reason: 'This request has not been moved yet.' });
 
-    const { notified, notifyError } = await notifySpawn(fr, fr.moved_at ? fr.moved_at.toISOString() : new Date().toISOString(), fr.timeline_note);
+    const { notified, notifyError } = await notifySpawn(fr, 'moved', fr.moved_at ? fr.moved_at.toISOString() : new Date().toISOString(), fr.timeline_note);
     await pool.query(`UPDATE feature_requests SET notified=$1, notify_error=$2 WHERE id=$3`, [notified, notifyError, fr.id]);
     res.json({ ok: true, notified, notifyError: notified ? null : notifyError });
   } catch(e) {
@@ -2066,10 +2066,10 @@ app.post('/api/requests/:id/retry-notify', requireAdmin, async (req, res) => {
   }
 });
 
-// Shared by /move and /retry-notify. Returns what actually happened, not
-// what we hoped would happen -- callers persist this rather than inferring
-// success from "we had enough to try with".
-async function notifySpawn(fr, movedAt, timelineNote) {
+// Shared by /move, /retry-notify, and the dev-tracker "Mark done" transition.
+// Returns what actually happened, not what we hoped would happen -- callers
+// persist this rather than inferring success from "we had enough to try with".
+async function notifySpawn(fr, status, movedAt, timelineNote) {
   if (!fr.callback_url || !fr.external_id || !fr.app_api_key) {
     return { notified: false, notifyError: 'Missing callback_url, external_id, or app_api_key on this request.' };
   }
@@ -2077,7 +2077,7 @@ async function notifySpawn(fr, movedAt, timelineNote) {
     const resp = await fetch(fr.callback_url.replace(/\/$/, '') + '/api/hooks/featureRequestUpdate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-API-Key': fr.app_api_key },
-      body: JSON.stringify({ externalId: fr.external_id, status: 'moved', movedAt, timelineNote: timelineNote || '' }),
+      body: JSON.stringify({ externalId: fr.external_id, status, movedAt, timelineNote: timelineNote || '' }),
       signal: AbortSignal.timeout(10000),
     });
     const text = await resp.text().catch(() => '');
@@ -2135,7 +2135,31 @@ app.post('/api/dev-tracker', requireAdmin, async (req, res) => {
         vals.push(item.id);
         await pool.query(`UPDATE dev_tracker SET ${sets.join(',')} WHERE id=$${idx}`, vals);
       }
-      res.json({ ok: true });
+
+      // Marking a card done here is the only other action (besides /move)
+      // that should tell the spawn -- a card can be linked to the request
+      // that spawned it, and the staff member who filed it is waiting to
+      // hear it shipped. Guarded on the linked request not already being
+      // 'done' so re-toggling backlog<->done on an already-notified card
+      // doesn't spam a second notification.
+      let notified, notifyError;
+      if (item.status === 'done') {
+        const linked = (await pool.query(
+          `SELECT fr.*, a.api_key AS app_api_key FROM dev_tracker dt
+           JOIN feature_requests fr ON fr.id = dt.source_request_id
+           LEFT JOIN apps a ON a.id = fr.app_id
+           WHERE dt.id=$1`,
+          [item.id]
+        )).rows[0];
+        if (linked && linked.status !== 'done') {
+          const doneAt = new Date().toISOString();
+          const timelineNote = item.timelineNote !== undefined ? item.timelineNote : linked.timeline_note;
+          ({ notified, notifyError } = await notifySpawn(linked, 'done', doneAt, timelineNote));
+          await pool.query(`UPDATE feature_requests SET status='done', notified=$1, notify_error=$2, updated_at=NOW() WHERE id=$3`, [notified, notifyError, linked.id]);
+        }
+      }
+
+      res.json({ ok: true, ...(notified !== undefined ? { notified, notifyError: notified ? null : notifyError } : {}) });
     } else {
       if (!item.title) return res.json({ ok: false, reason: 'title required' });
       await pool.query(
