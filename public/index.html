@@ -377,6 +377,7 @@
           <option value="moved">Moved to Dev Tracker</option>
           <option value="all">All</option>
         </select>
+        <input type="text" id="reqSearch" placeholder="Search title, description, requester..." style="flex:1;min-width:200px;" oninput="renderRequestList(filterRequests_())">
       </div>
       <div class="card" style="padding:0;overflow:hidden;" id="requestsList"></div>
     </div>
@@ -389,6 +390,9 @@
     <!-- ── Dev Tracker Page ── -->
     <div id="pageDevTracker" class="hidden">
       <h1 class="page-title">Dev Tracker</h1>
+      <div class="filters" style="margin-bottom:16px;">
+        <input type="text" id="dtSearch" placeholder="Search cards..." style="flex:1;min-width:200px;" oninput="renderDevTracker()">
+      </div>
       <div class="card" style="margin-bottom:16px;">
         <div style="font-weight:700;font-size:13px;margin-bottom:10px;">Add a card directly</div>
         <div class="filters" style="margin-bottom:8px;">
@@ -1343,7 +1347,22 @@ async function loadRequests() {
   const r = await api('GET', '/api/requests?status=' + encodeURIComponent(status));
   if (!r.ok) return;
   _requestsCache = r.requests;
-  renderRequestList(r.requests);
+  renderRequestList(filterRequests_());
+}
+
+// Search is applied client-side over whatever the status filter already
+// fetched -- no extra round-trip, and it stays in sync when the status
+// filter changes since loadRequests() re-runs it against the fresh cache.
+function filterRequests_() {
+  const q = (document.getElementById('reqSearch').value || '').trim().toLowerCase();
+  if (!q) return _requestsCache;
+  return _requestsCache.filter(req =>
+    (req.title || '').toLowerCase().includes(q) ||
+    (req.description || '').toLowerCase().includes(q) ||
+    (req.from_name || '').toLowerCase().includes(q) ||
+    (req.from_email || '').toLowerCase().includes(q) ||
+    (req.spawn_name || req.spawn || '').toLowerCase().includes(q)
+  );
 }
 
 function renderRequestList(requests) {
@@ -1735,14 +1754,22 @@ async function changeDevTrackerSection(id, input) {
 }
 
 function renderDevTracker() {
-  const backlog = _devTrackerCache.filter(i => i.status !== 'done');
-  const done = _devTrackerCache.filter(i => i.status === 'done');
+  const q = (document.getElementById('dtSearch').value || '').trim().toLowerCase();
+  const items = !q ? _devTrackerCache : _devTrackerCache.filter(i =>
+    (i.title || '').toLowerCase().includes(q) ||
+    (i.description || '').toLowerCase().includes(q) ||
+    (i.category || '').toLowerCase().includes(q) ||
+    (i.assigned_to || '').toLowerCase().includes(q) ||
+    (i.spawn_name || i.spawn || '').toLowerCase().includes(q)
+  );
+  const backlog = items.filter(i => i.status !== 'done');
+  const done = items.filter(i => i.status === 'done');
   document.getElementById('dtBacklog').innerHTML = backlog.length
     ? backlog.map(renderDevTrackerCard).join('')
-    : '<div class="empty-state" style="padding:20px;"><p>Nothing in the backlog.</p></div>';
+    : `<div class="empty-state" style="padding:20px;"><p>${q ? 'No cards match your search.' : 'Nothing in the backlog.'}</p></div>`;
   document.getElementById('dtDone').innerHTML = done.length
     ? done.map(renderDevTrackerCard).join('')
-    : '<div class="empty-state" style="padding:20px;"><p>Nothing done yet.</p></div>';
+    : `<div class="empty-state" style="padding:20px;"><p>${q ? 'No cards match your search.' : 'Nothing done yet.'}</p></div>`;
 }
 
 function renderDevTrackerCard(item) {
