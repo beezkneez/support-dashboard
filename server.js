@@ -6,6 +6,7 @@ const bcrypt = require('bcrypt');
 const cookieParser = require('cookie-parser');
 const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
+const crypto = require('crypto');
 const path = require('path');
 
 const app = express();
@@ -392,6 +393,11 @@ async function initDB() {
     await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS push_user_reply BOOLEAN DEFAULT TRUE`).catch(()=>{});
     await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS email_new_ticket BOOLEAN DEFAULT TRUE`).catch(()=>{});
     await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS push_new_feature_request BOOLEAN DEFAULT TRUE`).catch(()=>{});
+    // A long-lived credential for an admin's own scripts/tools -- generated
+    // from an already-logged-in session, so it never has to pass Turnstile
+    // itself. Plaintext, same as apps.api_key below; this table already holds
+    // nothing more sensitive than that.
+    await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS personal_token TEXT`).catch(()=>{});
     await client.query(`ALTER TABLE apps ADD COLUMN IF NOT EXISTS callback_url TEXT`).catch(()=>{});
     // Auto-configure the Aradia Time reply-back URL (only if not already set).
     await client.query(
@@ -645,6 +651,22 @@ async function initDB() {
 
 // ── Auth Middleware ──────────────────────────────────────────────────
 async function requireAdmin(req, res, next) {
+  // A personal token (Authorization: Bearer ...) is the escape hatch for an
+  // admin's own scripts -- it skips the browser login (and the Turnstile
+  // check on it) entirely, since it can only ever be minted from a session
+  // that already passed that check once. Session cookie/header still works
+  // exactly as before for the browser itself.
+  const bearer = /^Bearer\s+(.+)$/i.exec(req.headers['authorization'] || '');
+  if (bearer) {
+    const result = await pool.query(
+      `SELECT id, email, name FROM admin_users WHERE personal_token=$1`,
+      [bearer[1].trim()]
+    );
+    if (result.rows.length === 0) return res.status(401).json({ ok: false, reason: 'Invalid token' });
+    req.admin = result.rows[0];
+    return next();
+  }
+
   const token = req.cookies?.session || req.headers['x-session'];
   if (!token) return res.status(401).json({ ok: false, reason: 'Not authenticated' });
 
@@ -735,6 +757,21 @@ app.post('/api/auth/logout', async (req, res) => {
 
 app.get('/api/auth/me', requireAdmin, (req, res) => {
   res.json({ ok: true, admin: req.admin });
+});
+
+// Mints a new personal token for the caller, overwriting any previous one --
+// there is only ever one live at a time, so losing it means generating a
+// replacement rather than needing it revoked separately. Returned once: it
+// is never stored anywhere the admin can read it back, same as a password.
+app.post('/api/auth/personal-token', requireAdmin, async (req, res) => {
+  try {
+    const token = crypto.randomBytes(32).toString('hex');
+    await pool.query('UPDATE admin_users SET personal_token=$1 WHERE id=$2', [token, req.admin.id]);
+    res.json({ ok: true, token });
+  } catch (e) {
+    console.error('[auth/personal-token]', e.message);
+    res.json({ ok: false, reason: 'Server error' });
+  }
 });
 
 // ── App Webhook Routes (called by aradia-time / kronara-build) ──────

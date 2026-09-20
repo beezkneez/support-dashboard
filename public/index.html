@@ -610,6 +610,18 @@
         <div id="pushMsg" style="font-size:12.5px;color:var(--muted);margin-top:10px;"></div>
       </div>
 
+      <div class="card" style="margin-bottom:16px;">
+        <h3 style="margin-bottom:6px;">Personal Access Token</h3>
+        <p style="font-size:13px;color:var(--muted);margin-bottom:16px;">
+          For your own scripts to read this dashboard (e.g. Claude Code's
+          <code>/dev-tracker</code> command) without going through the login
+          page's bot-check. Send it as <code>Authorization: Bearer &lt;token&gt;</code>.
+          Generating a new one invalidates whichever one you had before.
+        </p>
+        <div id="personalTokenMsg" style="font-size:13px;margin-bottom:10px;"></div>
+        <button class="btn btn-primary btn-sm" onclick="generatePersonalToken()">Generate new token</button>
+      </div>
+
       <div class="card">
         <h3 style="margin-bottom:16px;">Connected Apps</h3>
         <p style="font-size:13px;color:var(--muted);margin-bottom:16px;">
@@ -750,6 +762,18 @@ async function doLogout() {
   STATE.admin = null;
   document.getElementById('appView').classList.add('hidden');
   document.getElementById('loginView').classList.remove('hidden');
+}
+
+async function generatePersonalToken() {
+  const msgEl = document.getElementById('personalTokenMsg');
+  msgEl.textContent = 'Generating…';
+  const r = await api('POST', '/api/auth/personal-token');
+  if (!r.ok) { msgEl.textContent = r.reason || 'Failed to generate a token.'; return; }
+  // Shown once -- the server never returns it again, same as a password.
+  msgEl.innerHTML =
+    '<div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 12px;word-break:break-all;font-family:monospace;margin-bottom:6px;">' +
+    esc(r.token) + '</div>' +
+    '<span style="color:var(--muted);">Copy this now — it won\'t be shown again. Any token you generated before this one no longer works.</span>';
 }
 
 // ── Navigation ─────────────────────────────────────────────────────
