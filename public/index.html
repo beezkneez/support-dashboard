@@ -1288,13 +1288,16 @@ async function loadKoraHealth() {
   }).join('');
 }
 
+let _koraChatCtx = null; // last loaded chat, for the "queue a fix" button
+
 async function openKoraChat(appId, sessionId) {
   showPage('korachatdetail');
   const el = document.getElementById('koraChatDetail');
   el.innerHTML = '<p style="color:var(--muted);">Loading…</p>';
   const r = await api('GET', `/api/koraHealth/chat?appId=${appId}&sessionId=${sessionId}`);
   if (!r.ok) { el.innerHTML = `<p>${esc(r.reason || 'Failed to load chat.')}</p>`; return; }
-  const s = r.session, msgs = r.messages || [];
+  const s = r.session, msgs = r.messages || [], topics = r.possibleTopics || [];
+  _koraChatCtx = { appName: r.appName, session: s, messages: msgs, possibleTopics: topics };
   el.innerHTML = `
     <div class="ticket-header">
       <div>
@@ -1307,8 +1310,13 @@ async function openKoraChat(appId, sessionId) {
           <span>${new Date(s.updated_at).toLocaleString()}</span>
           ${s.status === 'escalated' ? `<span>&middot;</span><span class="type-badge">escalated</span>` : ''}
         </div>
+        ${topics.length ? `<div class="meta-row" style="margin-top:4px;">Possible KB topic${topics.length === 1 ? '' : 's'}: ${topics.map(esc).join(', ')}</div>` : ''}
+      </div>
+      <div class="ticket-actions">
+        <button class="btn btn-primary" id="queueKoraFixBtn" onclick="queueKoraFix()">🛠 Queue for Kora fix</button>
       </div>
     </div>
+    <div id="queueKoraFixMsg" style="font-size:13px;color:var(--muted);margin-bottom:10px;"></div>
     <div class="message-thread">
       ${msgs.map(m => `
         <div class="msg-bubble ${m.role === 'assistant' ? 'admin' : 'user'}">
@@ -1322,6 +1330,37 @@ async function openKoraChat(appId, sessionId) {
         </div>
       `).join('')}
     </div>`;
+}
+
+async function queueKoraFix() {
+  if (!_koraChatCtx) return;
+  const { appName, session: s, messages: msgs, possibleTopics: topics } = _koraChatCtx;
+  const btn = document.getElementById('queueKoraFixBtn');
+  const msgEl = document.getElementById('queueKoraFixMsg');
+  btn.disabled = true;
+  const transcript = msgs.map(m =>
+    `[${m.role === 'assistant' ? 'Kora' : (s.user_name || s.user_email || 'Staff')}]${m.helpful === false ? ' (👎 unhelpful)' : ''} ${m.body}`
+  ).join('\n\n');
+  const description =
+    `Studio: ${appName || 'Unknown'}\n` +
+    `Asked by: ${s.user_name || s.user_email || 'Unknown'}\n` +
+    `When: ${new Date(s.updated_at).toLocaleString()}\n` +
+    (topics.length ? `Possible KB topic(s): ${topics.join(', ')}\n` : '') +
+    `\n--- Transcript ---\n${transcript}`;
+  const r = await api('POST', '/api/dev-tracker', {
+    title: `Kora: fix answer -- ${(s.title || 'chat').slice(0, 80)}`,
+    description,
+    category: 'Kora KB',
+    priority: 'normal',
+  });
+  if (r.ok) {
+    btn.textContent = '✓ Queued in Dev Tracker';
+    msgEl.textContent = 'Added to the backlog under category "Kora KB".';
+  } else {
+    btn.disabled = false;
+    msgEl.textContent = r.reason || 'Failed to queue.';
+    msgEl.style.color = 'var(--danger)';
+  }
 }
 
 async function loadTenants() {
