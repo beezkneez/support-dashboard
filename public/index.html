@@ -480,6 +480,11 @@
       <div id="koraHealthList" class="card" style="padding:0;overflow:hidden;"></div>
     </div>
 
+    <div id="pageKoraChatDetail" class="hidden">
+      <div class="back-link" onclick="showPage('korahealth')">&#8592; Back to Kora Health</div>
+      <div id="koraChatDetail"></div>
+    </div>
+
     <!-- ── Settings Page ── -->
     <!-- ── Tenants Page ── -->
     <div id="pageTenants" class="hidden">
@@ -749,7 +754,7 @@ async function doLogout() {
 
 // ── Navigation ─────────────────────────────────────────────────────
 function showPage(page) {
-  ['Dashboard', 'Tickets', 'TicketDetail', 'Requests', 'RequestDetail', 'DevTracker', 'DevTree', 'Changelog', 'KoraHealth', 'Tenants', 'Settings'].forEach(p => {
+  ['Dashboard', 'Tickets', 'TicketDetail', 'Requests', 'RequestDetail', 'DevTracker', 'DevTree', 'Changelog', 'KoraHealth', 'KoraChatDetail', 'Tenants', 'Settings'].forEach(p => {
     document.getElementById('page' + p).classList.add('hidden');
   });
   document.querySelectorAll('.sidebar nav a').forEach(a => a.classList.remove('active'));
@@ -788,6 +793,9 @@ function showPage(page) {
     document.getElementById('pageKoraHealth').classList.remove('hidden');
     document.querySelector('[data-page=korahealth]').classList.add('active');
     loadKoraHealth();
+  } else if (page === 'korachatdetail') {
+    document.getElementById('pageKoraChatDetail').classList.remove('hidden');
+    document.querySelector('[data-page=korahealth]').classList.add('active');
   } else if (page === 'tenants') {
     document.getElementById('pageTenants').classList.remove('hidden');
     document.querySelector('[data-page=tenants]').classList.add('active');
@@ -1236,22 +1244,60 @@ async function loadKoraHealth() {
         </div>`;
     }
     const bad = a.bad || [], stale = a.driftStale || [];
-    const preview = bad.length
-      ? bad.slice(0, 2).map(b => esc((b.title || 'Chat').slice(0, 60))).join(' · ')
-      : 'No unhelpful answers this week';
-    return `
-      <div class="ticket-row">
+    const header = `
+      <div class="ticket-row" style="cursor:default;">
         <span class="app-dot" style="background:${a.color || '#6366f1'}"></span>
-        <div class="subject">
-          ${esc(a.name)}
-          <span class="preview">${preview}</span>
-        </div>
+        <div class="subject">${esc(a.name)}</div>
         <div class="meta">
           <span class="${a.badCount7d > 0 ? 'text-warn' : ''}">👎 ${a.badCount7d} this week</span>
           <span class="${stale.length > 0 ? 'text-warn' : ''}" title="${stale.map(esc).join(', ')}">📚 ${stale.length} topic${stale.length === 1 ? '' : 's'} stale</span>
         </div>
       </div>`;
+    const rows = bad.map(b => `
+      <div class="ticket-row" style="padding-left:32px;" onclick="openKoraChat(${a.id},${b.session_id})">
+        <div class="subject">
+          ${esc(b.title || 'Chat')}
+          <span class="preview">${esc((b.body || '').slice(0, 140))}</span>
+        </div>
+      </div>`).join('');
+    return header + rows;
   }).join('');
+}
+
+async function openKoraChat(appId, sessionId) {
+  showPage('korachatdetail');
+  const el = document.getElementById('koraChatDetail');
+  el.innerHTML = '<p style="color:var(--muted);">Loading…</p>';
+  const r = await api('GET', `/api/koraHealth/chat?appId=${appId}&sessionId=${sessionId}`);
+  if (!r.ok) { el.innerHTML = `<p>${esc(r.reason || 'Failed to load chat.')}</p>`; return; }
+  const s = r.session, msgs = r.messages || [];
+  el.innerHTML = `
+    <div class="ticket-header">
+      <div>
+        <h2>${esc(s.title || 'Chat')}</h2>
+        <div class="meta-row">
+          <span>${esc(r.appName || '')}</span>
+          <span>&middot;</span>
+          <span>${esc(s.user_name || s.user_email || 'Unknown')}</span>
+          <span>&middot;</span>
+          <span>${new Date(s.updated_at).toLocaleString()}</span>
+          ${s.status === 'escalated' ? `<span>&middot;</span><span class="type-badge">escalated</span>` : ''}
+        </div>
+      </div>
+    </div>
+    <div class="message-thread">
+      ${msgs.map(m => `
+        <div class="msg-bubble ${m.role === 'assistant' ? 'admin' : 'user'}">
+          <div class="msg-header">
+            <span class="sender ${m.role === 'assistant' ? 'admin-sender' : ''}">${m.role === 'assistant' ? 'Kora' : esc(s.user_name || s.user_email || 'Staff')}</span>
+            <span class="time">${new Date(m.created_at).toLocaleString()}</span>
+          </div>
+          <div class="msg-body">${esc(m.body)}</div>
+          ${m.helpful === false ? `<div class="msg-source" style="color:var(--danger);">👎 marked unhelpful</div>` : ''}
+          ${m.helpful === true ? `<div class="msg-source" style="color:var(--success);">👍 marked helpful</div>` : ''}
+        </div>
+      `).join('')}
+    </div>`;
 }
 
 async function loadTenants() {

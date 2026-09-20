@@ -2522,6 +2522,49 @@ app.get('/api/koraHealth', requireAdmin, async (req, res) => {
   }
 });
 
+// The "view full chat" link on a flagged answer -- same per-app lookup as
+// koraHealth, then a second call to that one spawn's /hooks/koraChatDetail.
+app.get('/api/koraHealth/chat', requireAdmin, async (req, res) => {
+  try {
+    const appId = parseInt(req.query.appId, 10);
+    const sessionId = parseInt(req.query.sessionId, 10);
+    if (!appId || !sessionId) return res.json({ ok: false, reason: 'appId and sessionId required' });
+
+    const a = (await pool.query('SELECT id, name, callback_url, api_key FROM apps WHERE id=$1', [appId])).rows[0];
+    if (!a || !a.callback_url) return res.json({ ok: false, reason: 'That app has no callback URL registered.' });
+
+    let httpStatus = 0, raw = '', r;
+    try {
+      const resp = await fetch(a.callback_url.replace(/\/$/, '') + '/api/hooks/koraChatDetail', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': a.api_key },
+        body: JSON.stringify({ sessionId }),
+      });
+      httpStatus = resp.status;
+      raw = await resp.text();
+      if ((resp.headers.get('content-type') || '').includes('application/json')) {
+        try { r = JSON.parse(raw); } catch (_) { r = null; }
+      }
+    } catch (err) {
+      return res.json({ ok: false, reason: 'Could not reach that studio (' + err.message + ').' });
+    }
+    if (!r) {
+      const looksLikeAnErrorPage = /^\s*<(!doctype|html)/i.test(raw);
+      const reason = httpStatus === 404
+        ? 'That studio is on an older build that does not have this endpoint yet.'
+        : looksLikeAnErrorPage
+          ? 'That studio returned a web page instead of an answer (HTTP ' + httpStatus + ') -- probably restarting.'
+          : 'That studio gave an unreadable reply (HTTP ' + httpStatus + ').';
+      return res.json({ ok: false, reason });
+    }
+    if (!r.ok) return res.json({ ok: false, reason: r.reason || 'That studio refused the request.' });
+    res.json({ ok: true, appName: a.name, session: r.session, messages: r.messages });
+  } catch (e) {
+    console.error('[koraHealth/chat]', e.message);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
 // ── Tenants Management ──────────────────────────────────────────────
 // ── Kronara app directory: the list the mobile app reads ───────────────────
 // Public and unauthenticated on purpose — the app reads it before anyone logs
