@@ -185,7 +185,14 @@
   .kora-ctx-errs { margin-top: 10px; font-size: 12px; }
   .kora-ctx-errs span { color: var(--muted); display: block; margin-bottom: 3px; }
   .kora-ctx-errs code { display: block; white-space: pre-wrap; word-break: break-word; background: rgba(0,0,0,.05); padding: 7px 9px; border-radius: 6px; font-size: 11.5px; }
-  .kora-ctx-shot { display: block; margin-top: 10px; max-width: 260px; border-radius: 8px; border: 1px solid var(--note-border); }
+  .kora-ctx-shot { display: block; margin-top: 10px; max-width: 260px; border-radius: 8px; border: 1px solid var(--note-border); cursor: zoom-in; }
+  /* Full-size screenshot viewer. Attached screenshots are often huge base64
+     data: URIs — opening those via <a target="_blank"> hits browsers' limits
+     on navigating to a data: URL (blank tab on desktop, dead tap on mobile),
+     so we show them in-page instead of ever navigating to the URI itself. */
+  .kora-lightbox { display: none; position: fixed; inset: 0; z-index: 1000; background: rgba(0,0,0,.85); padding: 24px; cursor: zoom-out; align-items: center; justify-content: center; }
+  .kora-lightbox.open { display: flex; }
+  .kora-lightbox img { max-width: 100%; max-height: 100%; border-radius: 8px; box-shadow: 0 10px 40px rgba(0,0,0,.5); }
   .fwd-badge { font-size: 12px; font-weight: 700; color: #4338ca; background: #eef2ff; border-radius: 6px; padding: 4px 10px; }
   .note-bubble { background: var(--note-bg); border: 1px solid var(--note-border); padding: 12px 16px; border-radius: var(--radius); margin-bottom: 8px; font-size: 13px; }
   .note-bubble .note-header { font-size: 12px; color: var(--note-text); margin-bottom: 4px; }
@@ -246,6 +253,12 @@
 </style>
 </head>
 <body>
+
+<!-- Full-size screenshot viewer, shared by ticket/request threads. Click
+     anywhere to dismiss. -->
+<div id="koraLightbox" class="kora-lightbox" onclick="closeLightbox()">
+  <img id="koraLightboxImg" src="" alt="screenshot, full size">
+</div>
 
 <!-- ════ LOGIN ════ -->
 <div id="loginView" class="login-wrap">
@@ -1016,7 +1029,7 @@ function koraContextPanel(t) {
         `<div><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join('')}</div>` : ''}
       ${errs.length ? `<div class="kora-ctx-errs"><span>Errors on their device just before this</span>
         <code>${esc(errs.join(String.fromCharCode(10)))}</code></div>` : ''}
-      ${shot ? `<a href="${shot}" target="_blank" rel="noopener"><img class="kora-ctx-shot" src="${shot}" alt="screenshot they attached"></a>` : ''}
+      ${shot ? `<img class="kora-ctx-shot" src="${shot}" alt="screenshot they attached" onclick="openLightbox(this.src)">` : ''}
     </div>`;
 }
 
@@ -1089,7 +1102,7 @@ async function openTicket(id) {
             <span class="time">${new Date(m.created_at).toLocaleString()}</span>
           </div>
           <div class="msg-body">${esc(m.body)}</div>
-          ${shot ? `<a href="${shot}" target="_blank" rel="noopener"><img class="kora-ctx-shot" src="${shot}" alt="attached screenshot"></a>` : ''}
+          ${shot ? `<img class="kora-ctx-shot" src="${shot}" alt="attached screenshot" onclick="openLightbox(this.src)">` : ''}
           ${m.source !== 'app' ? `<div class="msg-source">via ${m.source}</div>` : ''}
         </div>
       `;}).join('')}
@@ -1634,7 +1647,7 @@ async function openRequest(id) {
             <span class="time">${new Date(m.created_at).toLocaleString()}</span>
           </div>
           <div class="msg-body">${esc(m.body)}</div>
-          ${shot ? `<a href="${shot}" target="_blank" rel="noopener"><img class="kora-ctx-shot" src="${shot}" alt="attached screenshot"></a>` : ''}
+          ${shot ? `<img class="kora-ctx-shot" src="${shot}" alt="attached screenshot" onclick="openLightbox(this.src)">` : ''}
           ${m.source !== 'app' ? `<div class="msg-source">via ${m.source}</div>` : ''}
         </div>
       `;}).join('')}
@@ -2401,6 +2414,16 @@ async function enablePush() {
   } catch (e) {
     set('Could not turn on notifications: ' + e.message);
   }
+}
+
+function openLightbox(src) {
+  document.getElementById('koraLightboxImg').src = src;
+  document.getElementById('koraLightbox').classList.add('open');
+}
+
+function closeLightbox() {
+  document.getElementById('koraLightbox').classList.remove('open');
+  document.getElementById('koraLightboxImg').src = '';
 }
 
 async function testPush() {
