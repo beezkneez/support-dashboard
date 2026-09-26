@@ -36,7 +36,7 @@ const ok = (c, label, detail) => {
                             server.indexOf("app.post('/api/hooks/ticket/:id/reply'"));
   ok(/aiSessionId/.test(hook) && /imageUrl/.test(hook) && /pageContext/.test(hook),
      "the ticket hook accepts the chat, the screenshot and the page context");
-  ok(/INSERT INTO tickets[\s\S]{0,400}ai_session_id, image_url, page_context/.test(hook),
+  ok(/INSERT INTO tickets[\s\S]{0,400}ai_session_id, image_url, image_urls, page_context/.test(hook),
      "and stores all three");
 
   ok(/ADD COLUMN IF NOT EXISTS forwarded_at/.test(server),
@@ -92,9 +92,10 @@ const ok = (c, label, detail) => {
      "which becomes a badge once it has been passed down");
 
   // A spawn without Bunny storage keeps the raw data URL; that is fine in an
-  // <img> but must never be treated as a link.
-  const panel = html.slice(html.indexOf("function koraContextPanel("), html.indexOf("async function forwardTicket("));
-  ok(/\^https\?:/.test(panel) || /https\?:\\\/\\\//.test(panel),
+  // <img> but must never be treated as a link. The scheme check now lives in
+  // the shared validShots() helper koraContextPanel calls.
+  const panel = html.slice(html.indexOf("function validShots("), html.indexOf("async function forwardTicket("));
+  ok(/\^\(https\?:\\\/\\\/\|data:image\\\//.test(panel),
      "the screenshot source is scheme-checked before it is rendered");
 }
 

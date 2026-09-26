@@ -14,9 +14,10 @@ const app = express();
 // Health check — must be first, before any middleware
 app.get('/health', (req, res) => res.send('ok'));
 
-// 10mb to leave room for a screenshot attached to an admin reply, base64-encoded
-// inline — the same way an inbound ticket's screenshot already travels.
-app.use(express.json({ limit: '10mb' }));
+// 25mb to leave room for several screenshots attached to one reply, each
+// base64-encoded inline — the same way an inbound ticket's screenshot
+// already travels.
+app.use(express.json({ limit: '25mb' }));
 app.use(cookieParser());
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.static(path.join(__dirname, 'public')));
@@ -28,6 +29,17 @@ app.use((req, res, next) => {
 });
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
+
+// Screenshots attached to a reply, a chat message, or an inbound ticket. Same
+// scheme rule everywhere (here and in the client's render-time checks): only
+// ever accept an http(s) link or an actual image data URL. Capped so nobody
+// can wedge an unbounded array into the body-size limit.
+const MAX_SHOT_ATTACHMENTS = 6;
+function normalizeImageUrls(input) {
+  const list = Array.isArray(input) ? input : (input ? [input] : []);
+  return list.filter(u => typeof u === 'string' && /^(https?:\/\/|data:image\/)/i.test(u))
+             .slice(0, MAX_SHOT_ATTACHMENTS);
+}
 
 // ── Resend ──────────────────────────────────────────────────────────
 let Resend;
@@ -372,6 +384,12 @@ async function initDB() {
     // Lets an admin attach a screenshot to their reply, same as a user can when
     // filing the ticket.
     await client.query(`ALTER TABLE ticket_messages ADD COLUMN IF NOT EXISTS image_url TEXT`).catch(()=>{});
+    // Multiple screenshots per message/ticket. Additive alongside the old
+    // singular image_url column so existing rows (and any spawn still on the
+    // old single-imageUrl webhook contract) keep rendering — new writers
+    // populate both, with image_url set to the first of image_urls.
+    await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS image_urls TEXT[]`).catch(()=>{});
+    await client.query(`ALTER TABLE ticket_messages ADD COLUMN IF NOT EXISTS image_urls TEXT[]`).catch(()=>{});
     // Push, per device. Support is answered only here now, so “I did not see
     // it” is a real failure. endpoint is UNIQUE so re-subscribing the same
     // browser updates its row instead of doubling every notification.
@@ -471,6 +489,7 @@ async function initDB() {
       )
     `).catch(()=>{});
     await client.query(`CREATE INDEX IF NOT EXISTS idx_feature_request_messages_fr ON feature_request_messages (feature_request_id, created_at)`).catch(()=>{});
+    await client.query(`ALTER TABLE feature_request_messages ADD COLUMN IF NOT EXISTS image_urls TEXT[]`).catch(()=>{});
 
     // Internal notes on a feature request, same shape as ticket_notes -- for
     // context an admin wants to leave for themselves without it ever going
@@ -778,7 +797,7 @@ app.post('/api/auth/personal-token', requireAdmin, async (req, res) => {
 app.post('/api/hooks/ticket', requireApiKey, async (req, res) => {
   try {
     const { externalId, tenantId, fromEmail, fromName, type, subject, body, spawn, spawnName, callbackUrl,
-            aiSessionId, imageUrl, pageContext, destination } = req.body;
+            aiSessionId, imageUrl, imageUrls, pageContext, destination } = req.body;
     if (!fromEmail || !body) return res.json({ ok: false, reason: 'fromEmail and body required' });
 
     // An older spawn sends no destination at all. Treating that as ours is the
@@ -786,14 +805,21 @@ app.post('/api/hooks/ticket', requireApiKey, async (req, res) => {
     // alternative silently files a studio's traffic as already handled.
     const dest = destination === 'studio' ? 'studio' : 'kronara';
 
+    // Unlike the reply endpoints, an inbound ticket is trusted as-is (it comes
+    // from our own spawn's API key, not a browser) — still capped so nothing
+    // unbounded lands in the array column.
+    const shots = (Array.isArray(imageUrls) ? imageUrls : (imageUrl ? [imageUrl] : []))
+      .filter(u => typeof u === 'string' && u).slice(0, MAX_SHOT_ATTACHMENTS);
+    const shot = shots[0] || imageUrl || null;
+
     const ticketId = uuidv4();
     await pool.query(
       `INSERT INTO tickets (id, app_id, external_id, tenant_id, from_email, from_name, type, subject, spawn, spawn_name, callback_url,
-                            ai_session_id, image_url, page_context, destination)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+                            ai_session_id, image_url, image_urls, page_context, destination)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
       [ticketId, req.app.id, externalId || null, tenantId || null,
        fromEmail, fromName || null, type || 'message', subject || '(no subject)', spawn || null, spawnName || null, callbackUrl || null,
-       aiSessionId || null, imageUrl || null, JSON.stringify(pageContext || {}), dest]
+       aiSessionId || null, shot, shots.length ? shots : null, JSON.stringify(pageContext || {}), dest]
     );
 
     await pool.query(
@@ -1447,11 +1473,10 @@ app.get('/api/tickets/:id', requireAdmin, async (req, res) => {
 app.post('/api/tickets/:id/reply', requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { body, imageUrl } = req.body;
+    const { body, imageUrl, imageUrls } = req.body;
     if (!body) return res.json({ ok: false, reason: 'body required' });
-    // Only ever store an http(s) link or an actual image data URL — same rule
-    // koraContextPanel applies on the way in.
-    const shot = imageUrl && /^(https?:\/\/|data:image\/)/i.test(imageUrl) ? imageUrl : null;
+    const shots = normalizeImageUrls(imageUrls && imageUrls.length ? imageUrls : imageUrl);
+    const shot = shots[0] || null; // legacy single-column compat
 
     const ticket = await pool.query(
       'SELECT t.*, a.name as app_name, a.color as app_color, a.api_key as app_api_key, a.callback_url as app_callback_url FROM tickets t LEFT JOIN apps a ON a.id=t.app_id WHERE t.id=$1',
@@ -1462,9 +1487,9 @@ app.post('/api/tickets/:id/reply', requireAdmin, async (req, res) => {
     const t = ticket.rows[0];
 
     await pool.query(
-      `INSERT INTO ticket_messages (ticket_id, sender_type, sender_name, sender_email, body, source, image_url)
-       VALUES ($1,'admin',$2,$3,$4,'dashboard',$5)`,
-      [id, req.admin.name || req.admin.email, req.admin.email, body, shot]
+      `INSERT INTO ticket_messages (ticket_id, sender_type, sender_name, sender_email, body, source, image_url, image_urls)
+       VALUES ($1,'admin',$2,$3,$4,'dashboard',$5,$6)`,
+      [id, req.admin.name || req.admin.email, req.admin.email, body, shot, shots.length ? shots : null]
     );
 
     // Update status to in_progress if it was open
@@ -1490,6 +1515,7 @@ app.post('/api/tickets/:id/reply', requireAdmin, async (req, res) => {
           externalId: t.external_id,
           body,
           imageUrl: shot,
+          imageUrls: shots,
           senderName: req.admin.name || 'Support',
           senderEmail: req.admin.email || ''
         })
@@ -1510,7 +1536,7 @@ app.post('/api/tickets/:id/reply', requireAdmin, async (req, res) => {
             <div style="border:1px solid #e5e7eb;border-top:0;padding:20px;border-radius:0 0 8px 8px;">
               <p>Hi ${t.from_name || 'there'},</p>
               <div style="white-space:pre-wrap;margin:16px 0;padding:16px;background:#f9fafb;border-radius:6px;">${body}</div>
-              ${shot ? `<img src="${shot}" alt="screenshot" style="max-width:100%;border-radius:6px;border:1px solid #e5e7eb;margin-bottom:16px;">` : ''}
+              ${shots.map(s => `<img src="${s}" alt="screenshot" style="max-width:100%;border-radius:6px;border:1px solid #e5e7eb;margin-bottom:16px;">`).join('')}
               <hr style="border:0;border-top:1px solid #e5e7eb;margin:16px 0;">
               <p style="color:#6b7280;font-size:14px;">Simply reply to this email to respond.</p>
             </div>
@@ -1937,9 +1963,10 @@ app.get('/api/requests/:id', requireAdmin, async (req, res) => {
 app.post('/api/requests/:id/reply', requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { body, imageUrl } = req.body;
+    const { body, imageUrl, imageUrls } = req.body;
     if (!body) return res.json({ ok: false, reason: 'body required' });
-    const shot = imageUrl && /^(https?:\/\/|data:image\/)/i.test(imageUrl) ? imageUrl : null;
+    const shots = normalizeImageUrls(imageUrls && imageUrls.length ? imageUrls : imageUrl);
+    const shot = shots[0] || null; // legacy single-column compat
 
     const fr = (await pool.query(
       `SELECT fr.*, a.name AS app_name, a.color AS app_color, a.api_key AS app_api_key, a.callback_url AS app_callback_url
@@ -1949,9 +1976,9 @@ app.post('/api/requests/:id/reply', requireAdmin, async (req, res) => {
     if (!fr) return res.json({ ok: false, reason: 'Not found' });
 
     await pool.query(
-      `INSERT INTO feature_request_messages (feature_request_id, sender_type, sender_name, sender_email, body, source, image_url)
-       VALUES ($1,'admin',$2,$3,$4,'dashboard',$5)`,
-      [id, req.admin.name || req.admin.email, req.admin.email, body, shot]
+      `INSERT INTO feature_request_messages (feature_request_id, sender_type, sender_name, sender_email, body, source, image_url, image_urls)
+       VALUES ($1,'admin',$2,$3,$4,'dashboard',$5,$6)`,
+      [id, req.admin.name || req.admin.email, req.admin.email, body, shot, shots.length ? shots : null]
     );
     await pool.query(`UPDATE feature_requests SET updated_at=NOW() WHERE id=$1`, [id]);
 
@@ -1967,6 +1994,7 @@ app.post('/api/requests/:id/reply', requireAdmin, async (req, res) => {
             externalId: fr.external_id,
             body,
             imageUrl: shot,
+            imageUrls: shots,
             senderName: req.admin.name || 'Support',
             senderEmail: req.admin.email || ''
           }),
@@ -2002,7 +2030,7 @@ app.post('/api/requests/:id/reply', requireAdmin, async (req, res) => {
             <div style="border:1px solid #e5e7eb;border-top:0;padding:20px;border-radius:0 0 8px 8px;">
               <p>Hi ${fr.from_name || 'there'},</p>
               <div style="white-space:pre-wrap;margin:16px 0;padding:16px;background:#f9fafb;border-radius:6px;">${body}</div>
-              ${shot ? `<img src="${shot}" alt="screenshot" style="max-width:100%;border-radius:6px;border:1px solid #e5e7eb;margin-bottom:16px;">` : ''}
+              ${shots.map(s => `<img src="${s}" alt="screenshot" style="max-width:100%;border-radius:6px;border:1px solid #e5e7eb;margin-bottom:16px;">`).join('')}
               <hr style="border:0;border-top:1px solid #e5e7eb;margin:16px 0;">
               <p style="color:#6b7280;font-size:14px;">Simply reply to this email to respond.</p>
             </div>

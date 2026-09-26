@@ -186,6 +186,8 @@
   .kora-ctx-errs span { color: var(--muted); display: block; margin-bottom: 3px; }
   .kora-ctx-errs code { display: block; white-space: pre-wrap; word-break: break-word; background: rgba(0,0,0,.05); padding: 7px 9px; border-radius: 6px; font-size: 11.5px; }
   .kora-ctx-shot { display: block; margin-top: 10px; max-width: 260px; border-radius: 8px; border: 1px solid var(--note-border); cursor: zoom-in; }
+  .kora-ctx-shots { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
+  .kora-ctx-shots .kora-ctx-shot { margin-top: 0; }
   /* Full-size screenshot viewer. Attached screenshots are often huge base64
      data: URIs — opening those via <a target="_blank"> hits browsers' limits
      on navigating to a data: URL (blank tab on desktop, dead tap on mobile),
@@ -207,8 +209,10 @@
   .reply-mode-hint { font-size: 12px; margin: -6px 0 10px; }
   .reply-mode-hint.mode-reply { color: var(--success); }
   .reply-mode-hint.mode-note { color: var(--muted); }
-  .reply-shot-preview { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
-  .reply-shot-preview img { max-width: 140px; max-height: 100px; border-radius: 8px; border: 1px solid var(--border); }
+  .reply-shot-preview { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 10px; margin-top: 10px; }
+  .reply-shot-thumb { position: relative; }
+  .reply-shot-thumb img { display: block; max-width: 140px; max-height: 100px; border-radius: 8px; border: 1px solid var(--border); cursor: zoom-in; }
+  .reply-shot-thumb .reply-shot-remove { position: absolute; top: -7px; right: -7px; width: 20px; height: 20px; border-radius: 50%; border: none; background: #111827; color: #fff; font-size: 13px; line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center; }
 
   .back-link { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); margin-bottom: 16px; cursor: pointer; }
   .back-link:hover { color: var(--text); }
@@ -999,6 +1003,14 @@ function renderTicketList(containerId, tickets) {
   `).join('');
 }
 
+// Only ever render an http(s) link or an actual image data URL. Reads the
+// new image_urls array when present, falling back to the older singular
+// image_url column for rows written before it existed.
+function validShots(urlsField, legacyUrl) {
+  const list = Array.isArray(urlsField) && urlsField.length ? urlsField : (legacyUrl ? [legacyUrl] : []);
+  return list.filter(u => typeof u === 'string' && /^(https?:\/\/|data:image\/)/i.test(u));
+}
+
 // ── Ticket Detail ──────────────────────────────────────────────────
 // Everything the spawn attached, laid out so triage does not need a reply just
 // to ask "which page were you on". A ticket that came from Kora arrives with
@@ -1014,13 +1026,9 @@ function koraContextPanel(t) {
   if (c.online === false) bits.push(['Network', 'offline at the time']);
 
   const errs = Array.isArray(c.recentErrors) ? c.recentErrors : [];
-  // Only ever render an http(s) image. A spawn without Bunny storage falls back
-  // to keeping the raw data URL, and that is fine in an <img> but must not be
-  // treated as a link.
-  const shot = t.image_url && /^https?:\/\//i.test(t.image_url) ? t.image_url
-             : (t.image_url && /^data:image\//i.test(t.image_url) ? t.image_url : '');
+  const shots = validShots(t.image_urls, t.image_url);
 
-  if (!bits.length && !errs.length && !shot) return '';
+  if (!bits.length && !errs.length && !shots.length) return '';
 
   return `
     <div class="kora-ctx">
@@ -1029,7 +1037,8 @@ function koraContextPanel(t) {
         `<div><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join('')}</div>` : ''}
       ${errs.length ? `<div class="kora-ctx-errs"><span>Errors on their device just before this</span>
         <code>${esc(errs.join(String.fromCharCode(10)))}</code></div>` : ''}
-      ${shot ? `<img class="kora-ctx-shot" src="${shot}" alt="screenshot they attached" onclick="openLightbox(this.src)">` : ''}
+      ${shots.length ? `<div class="kora-ctx-shots">${shots.map(s =>
+        `<img class="kora-ctx-shot" src="${s}" alt="screenshot they attached" onclick="openLightbox(this.src)">`).join('')}</div>` : ''}
     </div>`;
 }
 
@@ -1094,7 +1103,7 @@ async function openTicket(id) {
       ${msgs.map(m => {
         // Only ever render an http(s) or actual image data URL — same rule
         // koraContextPanel applies to the inbound screenshot.
-        const shot = m.image_url && /^(https?:\/\/|data:image\/)/i.test(m.image_url) ? m.image_url : '';
+        const shots = validShots(m.image_urls, m.image_url);
         return `
         <div class="msg-bubble ${m.sender_type}">
           <div class="msg-header">
@@ -1102,7 +1111,8 @@ async function openTicket(id) {
             <span class="time">${new Date(m.created_at).toLocaleString()}</span>
           </div>
           <div class="msg-body">${esc(m.body)}</div>
-          ${shot ? `<img class="kora-ctx-shot" src="${shot}" alt="attached screenshot" onclick="openLightbox(this.src)">` : ''}
+          ${shots.length ? `<div class="kora-ctx-shots">${shots.map(s =>
+            `<img class="kora-ctx-shot" src="${s}" alt="attached screenshot" onclick="openLightbox(this.src)">`).join('')}</div>` : ''}
           ${m.source !== 'app' ? `<div class="msg-source">via ${m.source}</div>` : ''}
         </div>
       `;}).join('')}
@@ -1124,57 +1134,101 @@ async function openTicket(id) {
         <div class="tab" onclick="switchReplyTab(this,'note')">Internal Note</div>
       </div>
       <div class="reply-mode-hint mode-reply" id="replyModeHint">📨 Sends to ${esc(t.from_name || t.from_email)} now, with a notification.</div>
-      <textarea id="replyBody" placeholder="Type your reply..." onpaste="handleReplyPaste(event)"></textarea>
-      <div id="replyShotPreview" class="reply-shot-preview hidden">
-        <img id="replyShotImg" src="" alt="attached screenshot">
-        <button type="button" class="btn btn-ghost btn-sm" onclick="clearReplyShot()">Remove</button>
-      </div>
+      <textarea id="replyBody" placeholder="Type your reply..." onpaste="handleShotPaste(event,'reply')"></textarea>
+      <div id="replyShotPreview" class="reply-shot-preview hidden"></div>
       <div class="actions">
         <button class="btn btn-primary" id="replyBtn" onclick="sendReply('${t.id}')">Send Reply</button>
         <button class="btn btn-ghost hidden" id="noteBtn" onclick="sendNote('${t.id}')">Add Note</button>
         <label class="btn btn-ghost btn-sm" id="replyShotLabel" style="cursor:pointer;">
-          📎 Attach screenshot
-          <input type="file" id="replyShotInput" accept="image/*" class="hidden" onchange="handleReplyShotInput(event)">
+          📎 Attach screenshot${MAX_SHOTS > 1 ? 's' : ''}
+          <input type="file" id="replyShotInput" accept="image/*" multiple class="hidden" onchange="handleShotInput(event,'reply')">
         </label>
       </div>
     </div>
   `;
-  replyShotDataUrl = null;
+  clearShots('reply');
 }
 
-// Screenshot to attach to the next reply — a paste, or the file picker,
-// either way turned into a data URL client-side. There is no upload
-// endpoint here; the string travels the same way tickets.image_url already
-// does for inbound screenshots.
-let replyShotDataUrl = null;
+// ── Multi-screenshot attach, shared by the ticket-reply and feature-request-
+// reply boxes (kind: 'reply' | 'requestReply'). A paste, or the file picker,
+// either way downscaled and turned into a data URL client-side. There is no
+// upload endpoint here; the strings travel the same way tickets.image_url
+// already does for inbound screenshots.
+const MAX_SHOTS = 6;
+const shotState = { reply: [], requestReply: [] };
 
-function setReplyShot(dataUrl) {
-  replyShotDataUrl = dataUrl;
-  document.getElementById('replyShotImg').src = dataUrl;
-  document.getElementById('replyShotPreview').classList.remove('hidden');
+function shotEl(kind, part) { return document.getElementById(kind + 'Shot' + part); }
+
+function downscaleImageFile(file, maxDim = 1600, quality = 0.85) {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result;
+      if (file.type === 'image/gif') { resolve(dataUrl); return; } // keep animation
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+        if (width <= maxDim && height <= maxDim) { resolve(dataUrl); return; }
+        const scale = maxDim / Math.max(width, height);
+        width = Math.round(width * scale); height = Math.round(height * scale);
+        const c = document.createElement('canvas');
+        c.width = width; c.height = height;
+        c.getContext('2d').drawImage(img, 0, 0, width, height);
+        resolve(c.toDataURL('image/jpeg', quality));
+      };
+      img.onerror = () => resolve(dataUrl);
+      img.src = dataUrl;
+    };
+    reader.onerror = () => resolve(null);
+    reader.readAsDataURL(file);
+  });
 }
 
-function clearReplyShot() {
-  replyShotDataUrl = null;
-  document.getElementById('replyShotInput').value = '';
-  document.getElementById('replyShotPreview').classList.add('hidden');
+function renderShotPreview(kind) {
+  const urls = shotState[kind];
+  const wrap = shotEl(kind, 'Preview');
+  wrap.classList.toggle('hidden', urls.length === 0);
+  wrap.innerHTML = urls.map((u, i) => `
+    <div class="reply-shot-thumb">
+      <img src="${u}" alt="attached screenshot ${i + 1}" onclick="openLightbox(this.src)">
+      <button type="button" class="reply-shot-remove" onclick="removeShot('${kind}',${i})" title="Remove">×</button>
+    </div>
+  `).join('');
 }
 
-function handleReplyShotInput(event) {
-  const file = event.target.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = () => setReplyShot(reader.result);
-  reader.readAsDataURL(file);
+async function addShotFiles(kind, files) {
+  const urls = shotState[kind];
+  for (const file of Array.from(files || [])) {
+    if (!file.type || !file.type.startsWith('image/')) continue;
+    if (urls.length >= MAX_SHOTS) break;
+    const dataUrl = await downscaleImageFile(file);
+    if (dataUrl) urls.push(dataUrl);
+  }
+  renderShotPreview(kind);
 }
 
-function handleReplyPaste(event) {
-  const item = Array.from(event.clipboardData?.items || []).find(i => i.type.startsWith('image/'));
-  if (!item) return;
+function handleShotInput(event, kind) {
+  addShotFiles(kind, event.target.files);
+  event.target.value = '';
+}
+
+function handleShotPaste(event, kind) {
+  const items = Array.from(event.clipboardData?.items || []).filter(i => i.type.startsWith('image/'));
+  if (!items.length) return;
   event.preventDefault();
-  const reader = new FileReader();
-  reader.onload = () => setReplyShot(reader.result);
-  reader.readAsDataURL(item.getAsFile());
+  addShotFiles(kind, items.map(i => i.getAsFile()));
+}
+
+function removeShot(kind, index) {
+  shotState[kind].splice(index, 1);
+  renderShotPreview(kind);
+}
+
+function clearShots(kind) {
+  shotState[kind] = [];
+  const input = shotEl(kind, 'Input');
+  if (input) input.value = '';
+  renderShotPreview(kind);
 }
 
 let replyMode = 'reply';
@@ -1192,13 +1246,13 @@ function switchReplyTab(el, mode) {
   hint.textContent = mode === 'reply'
     ? `📨 Sends to ${replyToName} now, with a notification.`
     : `🔒 Internal only — ${replyToName} will not see this.`;
-  if (mode === 'note') clearReplyShot();
+  if (mode === 'note') clearShots('reply');
 }
 
 async function sendReply(ticketId) {
   const body = document.getElementById('replyBody').value.trim();
   if (!body) return;
-  const r = await api('POST', `/api/tickets/${ticketId}/reply`, { body, imageUrl: replyShotDataUrl });
+  const r = await api('POST', `/api/tickets/${ticketId}/reply`, { body, imageUrls: shotState.reply });
   if (r.ok) { openTicket(ticketId); } else { alert(r.reason || 'Failed'); }
 }
 
@@ -1639,7 +1693,7 @@ async function openRequest(id) {
 
     <div class="message-thread">
       ${msgs.map(m => {
-        const shot = m.image_url && /^(https?:\/\/|data:image\/)/i.test(m.image_url) ? m.image_url : '';
+        const shots = validShots(m.image_urls, m.image_url);
         return `
         <div class="msg-bubble ${m.sender_type}">
           <div class="msg-header">
@@ -1647,7 +1701,8 @@ async function openRequest(id) {
             <span class="time">${new Date(m.created_at).toLocaleString()}</span>
           </div>
           <div class="msg-body">${esc(m.body)}</div>
-          ${shot ? `<img class="kora-ctx-shot" src="${shot}" alt="attached screenshot" onclick="openLightbox(this.src)">` : ''}
+          ${shots.length ? `<div class="kora-ctx-shots">${shots.map(s =>
+            `<img class="kora-ctx-shot" src="${s}" alt="attached screenshot" onclick="openLightbox(this.src)">`).join('')}</div>` : ''}
           ${m.source !== 'app' ? `<div class="msg-source">via ${m.source}</div>` : ''}
         </div>
       `;}).join('')}
@@ -1669,56 +1724,19 @@ async function openRequest(id) {
         <div class="tab" onclick="switchRequestReplyTab(this,'note')">Internal Note</div>
       </div>
       <div class="reply-mode-hint mode-reply" id="requestReplyModeHint">📨 Sends to ${esc(req.from_name || req.from_email)} now, with a notification.</div>
-      <textarea id="requestReplyBody" placeholder="Ask a question or leave an update..." onpaste="handleRequestReplyPaste(event)"></textarea>
-      <div id="requestReplyShotPreview" class="reply-shot-preview hidden">
-        <img id="requestReplyShotImg" src="" alt="attached screenshot">
-        <button type="button" class="btn btn-ghost btn-sm" onclick="clearRequestReplyShot()">Remove</button>
-      </div>
+      <textarea id="requestReplyBody" placeholder="Ask a question or leave an update..." onpaste="handleShotPaste(event,'requestReply')"></textarea>
+      <div id="requestReplyShotPreview" class="reply-shot-preview hidden"></div>
       <div class="actions">
         <button class="btn btn-primary" id="requestReplyBtn" onclick="sendRequestReply('${req.id}')">Send Message</button>
         <button class="btn btn-ghost hidden" id="requestNoteBtn" onclick="sendRequestNote('${req.id}')">Add Note</button>
         <label class="btn btn-ghost btn-sm" id="requestReplyShotLabel" style="cursor:pointer;">
-          📎 Attach screenshot
-          <input type="file" id="requestReplyShotInput" accept="image/*" class="hidden" onchange="handleRequestReplyShotInput(event)">
+          📎 Attach screenshot${MAX_SHOTS > 1 ? 's' : ''}
+          <input type="file" id="requestReplyShotInput" accept="image/*" multiple class="hidden" onchange="handleShotInput(event,'requestReply')">
         </label>
       </div>
     </div>
   `;
-  requestReplyShotDataUrl = null;
-}
-
-// Screenshot to attach to the next feature-request message/reply — same
-// paste-or-file-picker-to-data-URL flow as ticket replies (no upload
-// endpoint; the string travels the same way feature_request_messages.image_url does).
-let requestReplyShotDataUrl = null;
-
-function setRequestReplyShot(dataUrl) {
-  requestReplyShotDataUrl = dataUrl;
-  document.getElementById('requestReplyShotImg').src = dataUrl;
-  document.getElementById('requestReplyShotPreview').classList.remove('hidden');
-}
-
-function clearRequestReplyShot() {
-  requestReplyShotDataUrl = null;
-  document.getElementById('requestReplyShotInput').value = '';
-  document.getElementById('requestReplyShotPreview').classList.add('hidden');
-}
-
-function handleRequestReplyShotInput(event) {
-  const file = event.target.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = () => setRequestReplyShot(reader.result);
-  reader.readAsDataURL(file);
-}
-
-function handleRequestReplyPaste(event) {
-  const item = Array.from(event.clipboardData?.items || []).find(i => i.type.startsWith('image/'));
-  if (!item) return;
-  event.preventDefault();
-  const reader = new FileReader();
-  reader.onload = () => setRequestReplyShot(reader.result);
-  reader.readAsDataURL(item.getAsFile());
+  clearShots('requestReply');
 }
 
 let requestReplyMode = 'reply';
@@ -1731,7 +1749,7 @@ function switchRequestReplyTab(el, mode) {
   document.getElementById('requestReplyBtn').classList.toggle('hidden', mode === 'note');
   document.getElementById('requestNoteBtn').classList.toggle('hidden', mode === 'reply');
   document.getElementById('requestReplyShotLabel').classList.toggle('hidden', mode === 'note');
-  if (mode === 'note') clearRequestReplyShot();
+  if (mode === 'note') clearShots('requestReply');
   const hint = document.getElementById('requestReplyModeHint');
   hint.className = 'reply-mode-hint mode-' + mode;
   hint.textContent = mode === 'reply'
@@ -1742,7 +1760,7 @@ function switchRequestReplyTab(el, mode) {
 async function sendRequestReply(id) {
   const body = document.getElementById('requestReplyBody').value.trim();
   if (!body) return;
-  const r = await api('POST', `/api/requests/${id}/reply`, { body, imageUrl: requestReplyShotDataUrl });
+  const r = await api('POST', `/api/requests/${id}/reply`, { body, imageUrls: shotState.requestReply });
   if (r.ok) {
     openRequest(id);
     if (r.delivered === 'email') {
