@@ -1646,6 +1646,10 @@ async function openRequest(id) {
         · ${timeAgo(req.created_at)}
       </p>
       <div style="white-space:pre-wrap;background:var(--bg);border-radius:8px;padding:14px;margin:14px 0;">${esc(req.description || '(no description)')}</div>
+      ${(() => { const shots = validShots(req.image_urls, req.image_url); return shots.length
+        ? `<div class="kora-ctx-shots" style="margin:-8px 0 14px;">${shots.map(s =>
+            `<img class="kora-ctx-shot" src="${s}" alt="screenshot attached to the request" onclick="openLightbox(this.src)">`).join('')}</div>`
+        : ''; })()}
       ${alreadyMoved ? `
         <p style="color:var(--success);font-size:13px;font-weight:600;">
           ✓ Moved to Dev Tracker ${timeAgo(req.moved_at)} by ${esc(req.moved_by || '')}

@@ -468,6 +468,11 @@ async function initDB() {
     // Copied here at move time so a retry (or an audit of what was actually
     // communicated) doesn't depend on the dev_tracker card surviving unedited.
     await client.query(`ALTER TABLE feature_requests ADD COLUMN IF NOT EXISTS timeline_note TEXT DEFAULT ''`).catch(()=>{});
+    // Screenshot(s) attached to the original submission — same shape as
+    // ticket_messages.image_urls, but on the request itself: unlike a ticket,
+    // a feature request's opening description lives on this row, not as a
+    // first feature_request_messages row.
+    await client.query(`ALTER TABLE feature_requests ADD COLUMN IF NOT EXISTS image_urls TEXT[]`).catch(()=>{});
 
     // Two-way thread on a feature request, same shape as ticket_messages --
     // lets an admin ask a clarifying question instead of only ever being able
@@ -886,15 +891,16 @@ app.post('/api/hooks/ticket', requireApiKey, async (req, res) => {
 // submitting app on whether the dashboard could reach a database.
 app.post('/api/hooks/featureRequest', requireApiKey, async (req, res) => {
   try {
-    const { externalId, fromEmail, fromName, title, description, spawn, spawnName, callbackUrl } = req.body;
+    const { externalId, fromEmail, fromName, title, description, spawn, spawnName, callbackUrl, imageUrl, imageUrls } = req.body;
     if (!fromEmail || !title) return res.json({ ok: false, reason: 'fromEmail and title required' });
+    const shots = normalizeImageUrls(imageUrls && imageUrls.length ? imageUrls : imageUrl);
 
     const id = uuidv4();
     await pool.query(
-      `INSERT INTO feature_requests (id, app_id, external_id, spawn, spawn_name, callback_url, from_email, from_name, title, description)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      `INSERT INTO feature_requests (id, app_id, external_id, spawn, spawn_name, callback_url, from_email, from_name, title, description, image_urls)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
       [id, req.app.id, externalId || null, spawn || null, spawnName || null, callbackUrl || null,
-       fromEmail, fromName || null, title, description || '']
+       fromEmail, fromName || null, title, description || '', shots.length ? shots : null]
     );
 
     pushToAdmins(
