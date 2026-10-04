@@ -14,6 +14,10 @@ const app = express();
 // Health check — must be first, before any middleware
 app.get('/health', (req, res) => res.send('ok'));
 
+// Shared Google Ads sign-in callback for every studio: one redirect URI registered
+// with Google, forwarded to whichever studio started the connect. Holds no tokens.
+app.get('/google-ads/callback', require('./lib/adsRelay').relayHandler(() => process.env.GOOGLE_ADS_RELAY_SECRET || ''));
+
 // 25mb to leave room for several screenshots attached to one reply, each
 // base64-encoded inline — the same way an inbound ticket's screenshot
 // already travels.
