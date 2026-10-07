@@ -17,6 +17,10 @@ app.get('/health', (req, res) => res.send('ok'));
 // Shared Google Ads sign-in callback for every studio: one redirect URI registered
 // with Google, forwarded to whichever studio started the connect. Holds no tokens.
 app.get('/google-ads/callback', require('./lib/adsRelay').relayHandler(() => process.env.GOOGLE_ADS_RELAY_SECRET || ''));
+// Same hub, same secret, for Facebook Ads (Meta lists this address on its app).
+app.get('/facebook-ads/callback', require('./lib/adsRelay').relayHandler(
+  () => process.env.META_ADS_RELAY_SECRET || process.env.GOOGLE_ADS_RELAY_SECRET || '',
+  require('./lib/adsRelay').FACEBOOK));
 
 // 25mb to leave room for several screenshots attached to one reply, each
 // base64-encoded inline — the same way an inbound ticket's screenshot
