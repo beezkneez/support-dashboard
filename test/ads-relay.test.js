@@ -51,6 +51,30 @@ const run = (query) => {
   const noExtra = run({ code: "C", state: st, evil: "1" });
   ok(!noExtra.location.includes("evil"), "unknown parameters are not forwarded");
 }
+// Facebook Ads uses the same hub with its own return path and Meta's parameter names.
+{
+  const { FACEBOOK } = require("../lib/adsRelay");
+  const fbGood = "https://studio.example/auth/facebook-ads/callback";
+  const fst = signState(S, { r: fbGood, n: "abc" });
+  const runFb = (query) => {
+    const out = {};
+    relayHandler(() => S, FACEBOOK)({ query }, {
+      status(c) { out.status = c; return this; }, type() { return this; }, send(b) { out.body = b; return this; },
+      set() { return this; }, redirect(c, u) { out.status = c; out.location = u; },
+    });
+    return out;
+  };
+  const r = runFb({ code: "C0DE", state: fst });
+  ok(r.status === 302 && new URL(r.location).pathname === "/auth/facebook-ads/callback" && new URL(r.location).searchParams.get("code") === "C0DE", "a Facebook sign-in is forwarded to the studio's Facebook callback");
+  const e = runFb({ error: "access_denied", error_reason: "user_denied", error_description: "Permissions error", state: fst });
+  ok(/error_description=/.test(e.location) && /error_reason=user_denied/.test(e.location), "Meta's error details are forwarded");
+  ok(runFb({ code: "C", state: st }).status === 400, "a Google state is refused on the Facebook route");
+  ok(run({ code: "C", state: fst }).status === 400, "a Facebook state is refused on the Google route");
+  ok(!runFb({ code: "C", state: fst, scope: "x", evil: "1" }).location.includes("evil"), "unknown parameters are not forwarded");
+  const bad = runFb({ code: "C", state: "bad" });
+  ok(bad.status === 400 && /Facebook Ads/.test(bad.body), "a bad state gets a Facebook-worded 400");
+}
+ok(/\/facebook-ads\/callback/.test(fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8")), "Facebook route is mounted in server.js");
 ok(/\/google-ads\/callback/.test(fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8")), "route is mounted in server.js");
 
 console.log(fails ? "\n" + fails + " FAILED" : "\nall passed");
