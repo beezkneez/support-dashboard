@@ -29,8 +29,8 @@ function fakeResult(q, params) {
     admins[a.id] = a;
     return { rows: [{ id: a.id, email: a.email, name: a.name }] };
   }
-  if (/UPDATE admin_users SET dashboard_pages=\$1 WHERE id=\$2/i.test(s)) {
-    if (admins[params[1]]) admins[params[1]].dashboard_pages = params[0];
+  if (/UPDATE admin_users SET dashboard_pages=\$1, dashboard_hosts=\$2 WHERE id=\$3/i.test(s)) {
+    if (admins[params[2]]) { admins[params[2]].dashboard_pages = params[0]; admins[params[2]].dashboard_hosts = params[1]; }
     return { rows: [] };
   }
   return { rows: [], rowCount: 0 };
@@ -88,6 +88,12 @@ setTimeout(async () => {
     check("a first-time person gets their own row (email lowercased)", !!sam && r.json.admin.id === sam.id);
     check("with a password nobody knows", sam && typeof sam.password === "string" && sam.password.length > 20);
     check("their support pages are recorded for phone alerts", sam && sam.dashboard_pages === "tickets");
+
+    check("no studio limit is recorded as every studio (NULL)", sam && sam.dashboard_hosts === null);
+    r = await req("GET", "/api/auth/me", bridged({ "x-operator-scope": "hosts", "x-operator-hosts": "aradiafitness.app,book.aradiafitness.app" }));
+    check("a studio limit is recorded for phone alerts", sam && sam.dashboard_hosts === "aradiafitness.app,book.aradiafitness.app");
+    r = await req("GET", "/api/auth/me", bridged({ "x-bridge-token": "wrong-secret-123", "x-operator-scope": "all" }));
+    check("a forged 'all studios' without the secret gets nowhere", r.status === 401);
 
     r = await req("GET", "/api/auth/me", bridged({ "x-operator-email": "jud@example.com", "x-operator-role": "admin" }));
     check("an existing person reuses their row", r.json && r.json.admin.id === 1);

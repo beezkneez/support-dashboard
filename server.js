@@ -423,6 +423,9 @@ async function initDB() {
     // dashboard ("tickets,requests"). NULL = everything (admins, and anyone
     // who signs in here directly). Used to keep push to what they can see.
     await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS dashboard_pages TEXT`).catch(()=>{});
+    // Studio web addresses (hostnames) this person may see, as last reported
+    // by the dashboard. NULL = every studio.
+    await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS dashboard_hosts TEXT`).catch(()=>{});
     // A long-lived credential for an admin's own scripts/tools -- generated
     // from an already-logged-in session, so it never has to pass Turnstile
     // itself. Plaintext, same as apps.api_key below; this table already holds
@@ -714,9 +717,47 @@ async function adminFromBridge(req) {
        ON CONFLICT (email) DO UPDATE SET email=EXCLUDED.email RETURNING id, email, name`,
       [email, hash, name || email.split('@')[0]])).rows[0];
   }
-  await pool.query(`UPDATE admin_users SET dashboard_pages=$1 WHERE id=$2`, [pages, row.id]).catch(() => {});
+  const scope = bridgeScope(req);
+  await pool.query(`UPDATE admin_users SET dashboard_pages=$1, dashboard_hosts=$2 WHERE id=$3`,
+    [pages, scope ? scope.join(',') : null, row.id]).catch(() => {});
   return row;
 }
+
+// ── Studio limit for dashboard staff ──
+// The dashboard can limit a person to certain studios. Studios are told apart
+// by their web address: every ticket and request records the address of the
+// studio app it came from (callback_url). null = no limit. Only read from a
+// request that carries the real bridge secret.
+function bridgeScope(req) {
+  if (req.headers['x-bridge-token'] === undefined || !bridgeTokenOk(req.headers['x-bridge-token'])) return null;
+  if (String(req.headers['x-operator-scope'] || 'all') === 'all') return null;
+  return String(req.headers['x-operator-hosts'] || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+}
+const HOST_SQL = (col) => `lower(substring(${col} from '^https?://([^/:?#]+)'))`;
+function hostOf(u) { try { return new URL(String(u)).hostname.toLowerCase(); } catch (e) { return ''; } }
+// One ticket / request / directory row: refuse it outside the person's studios.
+function scopeGuard(sqlFor) {
+  return async (req, res, next) => {
+    const scope = bridgeScope(req);
+    if (!scope) return next();
+    try {
+      const q = sqlFor(req);
+      if (!q) return next();
+      const row = (await pool.query(q.sql, q.params)).rows[0];
+      if (!row) return next();                       // the route says "not found" itself
+      if ([row.h1, row.h2].some(h => h && scope.includes(h))) return next();
+      return res.status(404).json({ ok: false, reason: 'Not found' });
+    } catch (e) {
+      console.error('[scope]', e.message);
+      return res.status(500).json({ ok: false, reason: 'Server error' });
+    }
+  };
+}
+app.use('/api/tickets/:id', scopeGuard(req => ({ sql: `SELECT ${HOST_SQL('callback_url')} h1 FROM tickets WHERE id=$1`, params: [req.params.id] })));
+app.use('/api/requests/:id', scopeGuard(req => ({ sql: `SELECT ${HOST_SQL('callback_url')} h1 FROM feature_requests WHERE id=$1`, params: [req.params.id] })));
+app.use('/api/tenants/:id', scopeGuard(req => /^\d+$/.test(req.params.id)
+  ? { sql: `SELECT ${HOST_SQL('base_url')} h1, ${HOST_SQL('member_url')} h2 FROM tenants WHERE id=$1`, params: [req.params.id] }
+  : null));
 
 async function requireAdmin(req, res, next) {
   if (req.headers['x-bridge-token'] !== undefined) {
@@ -903,7 +944,7 @@ app.post('/api/hooks/ticket', requireApiKey, async (req, res) => {
     pushToAdmins(
       (type === 'bug' ? '🐛 Bug' : '💬 Support') + ' · ' + (spawnName || spawn || req.app.name),
       (fromName || fromEmail) + ': ' + (subject || body),
-      '/', 'ticket'
+      '/', 'ticket', callbackUrl
     );
 
     // Notify admin via email
@@ -958,7 +999,7 @@ app.post('/api/hooks/featureRequest', requireApiKey, async (req, res) => {
     pushToAdmins(
       '💡 Feature request · ' + (spawnName || spawn || req.app.name),
       (fromName || fromEmail) + ': ' + title,
-      '/', 'feature_request'
+      '/', 'feature_request', callbackUrl
     );
 
     res.json({ ok: true, requestId: id });
@@ -1044,7 +1085,7 @@ app.post('/api/hooks/ticket/:id/reply', requireApiKey, async (req, res) => {
     pushToAdmins(
       '↩ Reply · ' + req.app.name,
       (fromName || fromEmail) + ': ' + body,
-      '/', 'reply'
+      '/', 'reply', ticket.rows[0].callback_url
     );
     sendMail({
       to: process.env.ADMIN_EMAIL,
@@ -1119,7 +1160,7 @@ app.post('/api/hooks/featureRequest/:id/reply', requireApiKey, async (req, res) 
     pushToAdmins(
       '💡 Reply · ' + req.app.name,
       (fromName || fromEmail) + ': ' + body,
-      '/', 'reply'
+      '/', 'reply', fr.rows[0].callback_url
     );
     sendMail({
       to: process.env.ADMIN_EMAIL,
@@ -1164,7 +1205,7 @@ app.post('/api/hooks/featureRequestExtReply', requireApiKey, async (req, res) =>
     pushToAdmins(
       '💡 Reply · ' + req.app.name,
       (fromName || fromEmail) + ': ' + body,
-      '/', 'reply'
+      '/', 'reply', fr.rows[0].callback_url
     );
     sendMail({
       to: process.env.ADMIN_EMAIL,
@@ -1223,7 +1264,7 @@ app.post('/api/hooks/ticketPassBack', requireApiKey, async (req, res) => {
     pushToAdmins(
       '↩ Back to you · ' + (t.spawn_name || t.spawn || t.app_name || 'A studio'),
       (passedBackBy || 'The studio') + ': ' + (note || t.subject || 'passed a ticket back'),
-      '/', 'ticket'
+      '/', 'ticket', t.callback_url
     );
     sendMail({
       to: process.env.ADMIN_EMAIL,
@@ -1290,7 +1331,7 @@ app.post('/api/hooks/ticketStale', requireApiKey, async (req, res) => {
       '⏳ No reply · ' + who,
       (fromName || t.from_name || t.from_email || 'Someone') + ' has waited ' +
         (days || 'several') + ' days: ' + (subject || t.subject || 'a support request'),
-      '/', 'ticket'
+      '/', 'ticket', t.callback_url
     );
     sendMail({
       to: process.env.ADMIN_EMAIL,
@@ -1471,6 +1512,8 @@ app.get('/api/tickets', requireAdmin, async (req, res) => {
       params.push(`%${search}%`);
       idx++;
     }
+    const scope = bridgeScope(req);
+    if (scope) { where.push(`${HOST_SQL('t.callback_url')} = ANY($${idx++})`); params.push(scope); }
 
     const whereClause = where.length > 0 ? 'WHERE ' + where.join(' AND ') : '';
 
@@ -1650,7 +1693,7 @@ if (PUSH_READY) {
 }
 
 // Send to every device this admin has enrolled.
-async function pushToAdmins(title, body, url, category) {
+async function pushToAdmins(title, body, url, category, studioUrl) {
   if (!PUSH_READY) return;
   try {
     // Preference is per admin, per category. An admin with push off for a
@@ -1661,10 +1704,13 @@ async function pushToAdmins(title, body, url, category) {
     const pageOk = need
       ? `(a.dashboard_pages IS NULL OR string_to_array(a.dashboard_pages, ',') && ARRAY[${need.map(n => `'${n}'`).join(',')}]::text[])`
       : 'TRUE';
+    // Staff limited to certain studios only hear about those studios.
+    const host = studioUrl ? hostOf(studioUrl) : '';
+    const hostOk = `(a.dashboard_hosts IS NULL OR $1 = ANY(string_to_array(a.dashboard_hosts, ',')))`;
     const q = `SELECT s.* FROM push_subscriptions s
                  JOIN admin_users a ON a.id = s.admin_id
-                WHERE ${col ? `COALESCE(a.${col}, TRUE) = TRUE` : 'TRUE'} AND ${pageOk}`;
-    const subs = (await pool.query(q)).rows;
+                WHERE ${col ? `COALESCE(a.${col}, TRUE) = TRUE` : 'TRUE'} AND ${pageOk} AND ${hostOk}`;
+    const subs = (await pool.query(q, [host])).rows;
 
     await Promise.all(subs.map(async (s) => {
       try {
@@ -1927,6 +1973,9 @@ app.delete('/api/tickets/:id', requireAdmin, async (req, res) => {
 // ── Dashboard Stats ─────────────────────────────────────────────────
 app.get('/api/stats', requireAdmin, async (req, res) => {
   try {
+    const scope = bridgeScope(req);
+    const tWhere = scope ? `WHERE ${HOST_SQL('callback_url')} = ANY($1)` : '';
+    const sp = scope ? [scope] : [];
     const stats = await pool.query(`
       SELECT
         COUNT(*) FILTER (WHERE status='open') as open_count,
@@ -1946,17 +1995,19 @@ app.get('/api/stats', requireAdmin, async (req, res) => {
         COUNT(*) FILTER (
           WHERE status IN ('open','in_progress') AND stale_at IS NOT NULL
         ) as stale_count
-      FROM tickets
-    `);
+      FROM tickets ${tWhere}
+    `, sp);
 
     const byApp = await pool.query(`
       SELECT a.name, a.slug, a.color, COUNT(t.id) as count,
              COUNT(t.id) FILTER (WHERE t.status='open') as open_count
-      FROM apps a LEFT JOIN tickets t ON t.app_id=a.id
+      FROM apps a LEFT JOIN tickets t ON t.app_id=a.id ${scope ? `AND ${HOST_SQL('t.callback_url')} = ANY($1)` : ''}
+      ${scope ? `WHERE ${HOST_SQL('a.callback_url')} = ANY($1) OR EXISTS (SELECT 1 FROM tickets t2 WHERE t2.app_id=a.id AND ${HOST_SQL('t2.callback_url')} = ANY($1))` : ''}
       GROUP BY a.id ORDER BY a.name
-    `);
+    `, sp);
 
-    const newRequests = await pool.query(`SELECT COUNT(*) AS c FROM feature_requests WHERE status='new'`);
+    const newRequests = await pool.query(
+      `SELECT COUNT(*) AS c FROM feature_requests WHERE status='new' ${scope ? `AND ${HOST_SQL('callback_url')} = ANY($1)` : ''}`, sp);
     stats.rows[0].new_requests_count = newRequests.rows[0].c;
 
     res.json({ ok: true, stats: stats.rows[0], byApp: byApp.rows });
@@ -1973,6 +2024,8 @@ app.get('/api/requests', requireAdmin, async (req, res) => {
     const params = [];
     let where = '1=1';
     if (status !== 'all') { params.push(status); where = `fr.status = $${params.length}`; }
+    const scope = bridgeScope(req);
+    if (scope) { params.push(scope); where += ` AND ${HOST_SQL('fr.callback_url')} = ANY($${params.length})`; }
     const result = await pool.query(
       `SELECT fr.*, a.name AS app_name, a.color AS app_color
        FROM feature_requests fr LEFT JOIN apps a ON a.id = fr.app_id
@@ -2610,7 +2663,9 @@ app.get('/api/koraHealth', requireAdmin, async (req, res) => {
   try {
     const q = await pool.query(
       `SELECT id, name, slug, color, api_key, callback_url FROM apps
-        WHERE callback_url IS NOT NULL AND callback_url <> '' ORDER BY name`
+        WHERE callback_url IS NOT NULL AND callback_url <> ''
+        ${bridgeScope(req) ? `AND ${HOST_SQL('callback_url')} = ANY($1)` : ''} ORDER BY name`,
+      bridgeScope(req) ? [bridgeScope(req)] : []
     );
     const apps = await Promise.all(q.rows.map(async (a) => {
       const base = { id: a.id, name: a.name, slug: a.slug, color: a.color };
@@ -2658,6 +2713,8 @@ app.get('/api/koraHealth/chat', requireAdmin, async (req, res) => {
 
     const a = (await pool.query('SELECT id, name, callback_url, api_key FROM apps WHERE id=$1', [appId])).rows[0];
     if (!a || !a.callback_url) return res.json({ ok: false, reason: 'That app has no callback URL registered.' });
+    const scope = bridgeScope(req);
+    if (scope && !scope.includes(hostOf(a.callback_url))) return res.status(404).json({ ok: false, reason: 'Not found' });
 
     let httpStatus = 0, raw = '', r;
     try {
@@ -2750,7 +2807,9 @@ app.get('/api/tenants', requireAdmin, async (req, res) => {
     const result = await pool.query(
       `SELECT t.*, a.name as app_name, a.slug as app_slug, a.color as app_color
        FROM tenants t LEFT JOIN apps a ON a.id=t.app_id
-       ORDER BY t.created_at DESC`
+       ${bridgeScope(req) ? `WHERE ${HOST_SQL('t.base_url')} = ANY($1) OR ${HOST_SQL('t.member_url')} = ANY($1)` : ''}
+       ORDER BY t.created_at DESC`,
+      bridgeScope(req) ? [bridgeScope(req)] : []
     );
     res.json({ ok: true, tenants: result.rows });
   } catch(e) {
