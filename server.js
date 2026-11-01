@@ -419,6 +419,10 @@ async function initDB() {
     await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS push_user_reply BOOLEAN DEFAULT TRUE`).catch(()=>{});
     await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS email_new_ticket BOOLEAN DEFAULT TRUE`).catch(()=>{});
     await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS push_new_feature_request BOOLEAN DEFAULT TRUE`).catch(()=>{});
+    // Support pages this person may open, as last reported by the Kronara
+    // dashboard ("tickets,requests"). NULL = everything (admins, and anyone
+    // who signs in here directly). Used to keep push to what they can see.
+    await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS dashboard_pages TEXT`).catch(()=>{});
     // A long-lived credential for an admin's own scripts/tools -- generated
     // from an already-logged-in session, so it never has to pass Turnstile
     // itself. Plaintext, same as apps.api_key below; this table already holds
@@ -682,7 +686,47 @@ async function initDB() {
 }
 
 // ── Auth Middleware ──────────────────────────────────────────────────
+// Requests passed on by the Kronara dashboard (dashboard.kronara.app/support).
+// The dashboard has already signed the person in and checked which pages they
+// may open; it proves that with SUPPORT_BRIDGE_TOKEN, a secret only it holds.
+// The person gets their own admin_users row (made on first visit) so replies,
+// notes and phone notifications are theirs.
+function bridgeTokenOk(supplied) {
+  const expected = String(process.env.SUPPORT_BRIDGE_TOKEN || '').trim();
+  if (!expected) return false;
+  const a = Buffer.from(String(supplied || ''), 'utf8');
+  const b = Buffer.from(expected, 'utf8');
+  if (a.length !== b.length) return false;
+  try { return crypto.timingSafeEqual(a, b); } catch (e) { return false; }
+}
+async function adminFromBridge(req) {
+  const email = String(req.headers['x-operator-email'] || '').trim().toLowerCase();
+  if (!email) return null;
+  let name = '';
+  try { name = decodeURIComponent(String(req.headers['x-operator-name'] || '')).slice(0, 80); } catch (e) {}
+  const pages = req.headers['x-operator-role'] === 'admin' ? null : String(req.headers['x-operator-pages'] || '');
+  let row = (await pool.query(`SELECT id, email, name FROM admin_users WHERE LOWER(email)=$1`, [email])).rows[0];
+  if (!row) {
+    // No password anyone knows: this row is only ever reached through the dashboard.
+    const hash = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 10);
+    row = (await pool.query(
+      `INSERT INTO admin_users (email, password, name) VALUES ($1,$2,$3)
+       ON CONFLICT (email) DO UPDATE SET email=EXCLUDED.email RETURNING id, email, name`,
+      [email, hash, name || email.split('@')[0]])).rows[0];
+  }
+  await pool.query(`UPDATE admin_users SET dashboard_pages=$1 WHERE id=$2`, [pages, row.id]).catch(() => {});
+  return row;
+}
+
 async function requireAdmin(req, res, next) {
+  if (req.headers['x-bridge-token'] !== undefined) {
+    if (!bridgeTokenOk(req.headers['x-bridge-token'])) return res.status(401).json({ ok: false, reason: 'Invalid bridge token' });
+    const admin = await adminFromBridge(req).catch(e => { console.error('[bridge]', e.message); return null; });
+    if (!admin) return res.status(401).json({ ok: false, reason: 'No operator on the bridged request' });
+    req.admin = admin;
+    req.viaDashboard = true;
+    return next();
+  }
   // A personal token (Authorization: Bearer ...) is the escape hatch for an
   // admin's own scripts -- it skips the browser login (and the Turnstile
   // check on it) entirely, since it can only ever be minted from a session
@@ -1612,18 +1656,21 @@ async function pushToAdmins(title, body, url, category) {
     // Preference is per admin, per category. An admin with push off for a
     // category simply has no rows returned for it.
     const col = { ticket: 'push_new_ticket', reply: 'push_user_reply', feature_request: 'push_new_feature_request' }[category] || null;
-    const q = col
-      ? `SELECT s.* FROM push_subscriptions s
-           JOIN admin_users a ON a.id = s.admin_id
-          WHERE COALESCE(a.${col}, TRUE) = TRUE`
-      : `SELECT s.* FROM push_subscriptions s`;
+    // Dashboard staff only hear about what they can open.
+    const need = { ticket: ['tickets'], reply: ['tickets', 'requests'], feature_request: ['requests'] }[category] || null;
+    const pageOk = need
+      ? `(a.dashboard_pages IS NULL OR string_to_array(a.dashboard_pages, ',') && ARRAY[${need.map(n => `'${n}'`).join(',')}]::text[])`
+      : 'TRUE';
+    const q = `SELECT s.* FROM push_subscriptions s
+                 JOIN admin_users a ON a.id = s.admin_id
+                WHERE ${col ? `COALESCE(a.${col}, TRUE) = TRUE` : 'TRUE'} AND ${pageOk}`;
     const subs = (await pool.query(q)).rows;
 
     await Promise.all(subs.map(async (s) => {
       try {
         await webpush.sendNotification(
           { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } },
-          JSON.stringify({ title, body: String(body || '').slice(0, 180), url: url || '/' })
+          JSON.stringify({ title, body: String(body || '').slice(0, 180), url: url || '/', category: category || null })
         );
         await pool.query(`UPDATE push_subscriptions SET last_ok = NOW() WHERE id = $1`, [s.id]).catch(() => {});
       } catch (err) {
