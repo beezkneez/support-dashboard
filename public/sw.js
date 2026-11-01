@@ -1,5 +1,10 @@
-const CACHE_NAME = 'supporthub-v1';
-const STATIC_ASSETS = ['/', '/index.html', '/manifest.json'];
+const CACHE_NAME = 'supporthub-v2';
+// Relative to where this worker lives: / on support.kronara.app, /support/ on
+// dashboard.kronara.app.
+const SCOPE = self.registration.scope;
+const IN_DASHBOARD = new URL(SCOPE).pathname.startsWith('/support');
+const at = (p) => new URL(p, SCOPE).href;
+const STATIC_ASSETS = [at('./'), at('index.html'), at('manifest.json')];
 
 self.addEventListener('install', e => {
   e.waitUntil(
@@ -30,9 +35,9 @@ self.addEventListener('push', e => {
   e.waitUntil(
     self.registration.showNotification(title, {
       body: d.body || 'You have a new support message.',
-      icon: '/icon-192.png',
-      badge: '/icon-192.png',
-      data: { url: d.url || '/' },
+      icon: at('icon-192.png'),
+      badge: at('icon-192.png'),
+      data: { url: openUrl(d) },
       // Collapses repeats from a burst into one entry rather than a stack of
       // near-identical notifications.
       tag: 'support-ticket',
@@ -40,6 +45,13 @@ self.addEventListener('push', e => {
     })
   );
 });
+
+// Where a tap should land. In the Kronara dashboard, the matching menu item.
+function openUrl(d) {
+  if (!IN_DASHBOARD) return d.url || '/';
+  const tab = d.category === 'feature_request' ? 'requests' : 'tickets';
+  return new URL('/#' + tab, SCOPE).href;
+}
 
 // Focus an already-open dashboard rather than opening a second copy of it.
 self.addEventListener('notificationclick', e => {
