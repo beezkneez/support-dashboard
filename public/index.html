@@ -322,6 +322,10 @@
         <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h12M2 7h12M2 11h8"/><circle cx="14" cy="11" r="2"/></svg>
         Tenants
       </a>
+      <a href="#" data-page="alerts" onclick="showPage('alerts')">
+        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 11V7a4 4 0 0 1 8 0v4l1 2H3zM6.5 14.5a1.5 1.5 0 0 0 3 0"/></svg>
+        My phone alerts
+      </a>
       <a href="#" data-page="settings" onclick="showPage('settings')">
         <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="8" cy="8" r="3"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M3 13l1.5-1.5M11.5 4.5L13 3"/></svg>
         Settings
@@ -610,8 +614,8 @@
       </div>
     </div>
 
-    <div id="pageSettings" class="hidden">
-      <h1 class="page-title">Settings</h1>
+    <div id="pageAlerts" class="hidden">
+      <h1 class="page-title">My phone alerts</h1>
 
       <!-- Support is answered only here now, so being told promptly is part of
            the system working rather than a nicety. -->
@@ -630,6 +634,10 @@
         </div>
         <div id="pushMsg" style="font-size:12.5px;color:var(--muted);margin-top:10px;"></div>
       </div>
+    </div>
+
+    <div id="pageSettings" class="hidden">
+      <h1 class="page-title">Settings</h1>
 
       <div class="card" style="margin-bottom:16px;">
         <h3 style="margin-bottom:6px;">Personal Access Token</h3>
@@ -709,6 +717,8 @@ const EMBED = window.__KRONARA_EMBED || null;
 const BASE = location.pathname.startsWith('/support') ? '/support' : '';
 const PAGE_OWNER = { ticketDetail: 'tickets', requestDetail: 'requests', korachatdetail: 'korahealth' };
 function canSee(page) {
+  // Everyone here may set up their own phone alerts.
+  if (page === 'alerts') return true;
   return !EMBED || (EMBED.pages || []).includes(PAGE_OWNER[page] || page);
 }
 if (EMBED) document.body.classList.add('embedded');
@@ -829,7 +839,7 @@ function showPage(page) {
     if ((location.hash || '').slice(1) !== top && !PAGE_OWNER[page]) history.replaceState(null, '', '#' + top);
     try { if (window.parent !== window) window.parent.postMessage({ kind: 'support-page', page: top }, location.origin); } catch (e) {}
   }
-  ['Dashboard', 'Tickets', 'TicketDetail', 'Requests', 'RequestDetail', 'DevTracker', 'DevTree', 'Changelog', 'KoraHealth', 'KoraChatDetail', 'Tenants', 'Settings'].forEach(p => {
+  ['Dashboard', 'Tickets', 'TicketDetail', 'Requests', 'RequestDetail', 'DevTracker', 'DevTree', 'Changelog', 'KoraHealth', 'KoraChatDetail', 'Tenants', 'Alerts', 'Settings'].forEach(p => {
     document.getElementById('page' + p).classList.add('hidden');
   });
   document.querySelectorAll('.sidebar nav a').forEach(a => a.classList.remove('active'));
@@ -875,6 +885,10 @@ function showPage(page) {
     document.getElementById('pageTenants').classList.remove('hidden');
     document.querySelector('[data-page=tenants]').classList.add('active');
     loadTenants();
+  } else if (page === 'alerts') {
+    document.getElementById('pageAlerts').classList.remove('hidden');
+    document.querySelector('[data-page=alerts]').classList.add('active');
+    loadPushSettings();
   } else if (page === 'settings') {
     document.getElementById('pageSettings').classList.remove('hidden');
     document.querySelector('[data-page=settings]').classList.add('active');
@@ -2415,7 +2429,7 @@ async function loadPushSettings() {
     </label>`;
 
   prefsEl.innerHTML =
-    row('push_new_ticket', 'Push me when a ticket arrives', 'Any studio, any spawn — this is the one that matters.') +
+    row('push_new_ticket', 'Push me when a ticket arrives', 'Any studio you can see — this is the one that matters.') +
     row('push_user_reply', 'Push me when someone replies', 'A reply on a ticket you are already in.') +
     row('email_new_ticket', 'Email me as well', 'Independent of push. Off means push only.') +
     (r.enabled ? '' : '<p style="font-size:12.5px;color:var(--danger,#b91c1c);margin-top:8px;">Push is not configured on the server (VAPID keys unset) — email only until it is.</p>');
