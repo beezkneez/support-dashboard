@@ -230,6 +230,35 @@
   .api-key-box { font-family: monospace; font-size: 12px; background: var(--bg); border: 1px solid var(--border); padding: 6px 10px; border-radius: 6px; word-break: break-all; color: var(--text); }
   pre { background: var(--bg) !important; border-color: var(--border) !important; color: var(--text) !important; }
 
+  /* ── Uptime ─────────────────────── */
+  .up-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .up-card { background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--muted); border-radius: var(--radius); padding: 16px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+  .up-card.is-up { border-left-color: var(--success); }
+  .up-card.is-down { border-left-color: var(--danger); }
+  .up-card.is-shaky { border-left-color: var(--warn); }
+  .up-head { display: flex; align-items: flex-start; gap: 10px; }
+  .up-name { font-weight: 600; font-size: 15px; }
+  .up-host { font-size: 12px; color: var(--muted); word-break: break-all; }
+  .up-pill { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px; padding: 3px 9px; border-radius: 20px; border: 1px solid currentColor; white-space: nowrap; }
+  .up-pill.up { color: var(--success); } .up-pill.down { color: var(--danger); } .up-pill.shaky { color: var(--warn); } .up-pill.idle { color: var(--muted); }
+  .up-clock { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -.3px; }
+  .up-clock .lead { font-size: 13px; font-weight: 500; color: var(--muted); margin-right: 6px; letter-spacing: 0; }
+  .up-clock.down { color: var(--danger); }
+  .up-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .up-stat .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
+  .up-stat .v { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .up-strip { display: flex; gap: 2px; height: 22px; align-items: stretch; }
+  .up-strip span { flex: 1; border-radius: 2px; background: var(--border); }
+  .up-strip span.ok { background: var(--success); }
+  .up-strip span.part { background: var(--warn); }
+  .up-strip span.bad { background: var(--danger); }
+  .up-strip-legend { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin-top: -6px; }
+  .up-foot { font-size: 12px; color: var(--muted); }
+  .up-err { font-size: 12px; color: var(--danger); word-break: break-word; }
+  .up-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .up-lbl { font-size: 12px; color: var(--muted); display: block; margin-bottom: 4px; }
+  @media (max-width: 768px) { .up-add { grid-template-columns: 1fr !important; } .up-grid { grid-template-columns: 1fr; } }
+
   /* ── Responsive ─────────────────── */
   /* ── Mobile Bottom Nav ────────── */
   @media (max-width: 768px) {
@@ -321,6 +350,11 @@
       <a href="#" data-page="tenants" onclick="showPage('tenants')">
         <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h12M2 7h12M2 11h8"/><circle cx="14" cy="11" r="2"/></svg>
         Tenants
+      </a>
+      <a href="#" data-page="uptime" onclick="showPage('uptime')">
+        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 8h3l2-5 4 10 2-5h3"/></svg>
+        Uptime
+        <span id="uptimeBadge" class="badge hidden">0</span>
       </a>
       <a href="#" data-page="alerts" onclick="showPage('alerts')">
         <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 11V7a4 4 0 0 1 8 0v4l1 2H3zM6.5 14.5a1.5 1.5 0 0 0 3 0"/></svg>
@@ -614,6 +648,47 @@
       </div>
     </div>
 
+    <!-- ── Uptime Page ── Sites are data (uptime_sites), edited here. -->
+    <div id="pageUptime" class="hidden">
+      <h1 class="page-title">Uptime</h1>
+      <p id="uptimeSummary" style="font-size:13px;color:var(--muted);margin:-12px 0 16px;"></p>
+      <div id="uptimeGrid" class="up-grid"></div>
+
+      <div id="uptimeSuggest" class="card hidden">
+        <h3 style="margin-bottom:6px;">Known studios not monitored yet</h3>
+        <p style="font-size:12.5px;color:var(--muted);margin-bottom:10px;">From the studio directory and recent tickets.</p>
+        <div id="uptimeSuggestList"></div>
+      </div>
+
+      <div class="card">
+        <h3 style="margin-bottom:12px;">Add a site</h3>
+        <div style="display:grid;grid-template-columns:minmax(160px,1fr) minmax(240px,2fr) auto;gap:8px;align-items:end;" class="up-add">
+          <div>
+            <label class="up-lbl">Name</label>
+            <input id="uptimeNewName" placeholder="Studio name" style="width:100%;">
+          </div>
+          <div>
+            <label class="up-lbl">URL to check</label>
+            <input id="uptimeNewUrl" placeholder="https://studio.kronara.app/api/known-features" style="width:100%;">
+          </div>
+          <button class="btn btn-primary" onclick="addUptimeSite()">Add</button>
+        </div>
+        <div id="uptimeAddMsg" style="font-size:12.5px;margin-top:8px;color:var(--muted);">
+          For a studio, check <code>/api/known-features</code>: tiny and always public. A 2xx or 3xx answer within 10s counts as up.
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 style="margin-bottom:6px;">Down / recovered emails</h3>
+        <p style="font-size:12.5px;color:var(--muted);margin-bottom:10px;">One email when a site goes down (after 2 failed checks in a row) and one when it recovers. Separate several addresses with commas; leave empty to turn emails off.</p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <input id="uptimeAlertTo" placeholder="admin@kronara.app" style="flex:1;min-width:220px;">
+          <button class="btn btn-primary" onclick="saveUptimeAlertTo()">Save</button>
+        </div>
+        <div id="uptimeAlertMsg" style="font-size:12.5px;margin-top:8px;"></div>
+      </div>
+    </div>
+
     <div id="pageAlerts" class="hidden">
       <h1 class="page-title">My phone alerts</h1>
 
@@ -743,6 +818,9 @@ async function checkAuth() {
     loadDashboard();
     loadApps();
     if (EMBED) showPage((location.hash || '').slice(1) || 'dashboard');
+    // The down/recovered emails link straight to #uptime.
+    else if (location.hash === '#uptime') showPage('uptime');
+    refreshUptimeBadge_();
   } else if (EMBED) {
     // Never show our own password form inside the dashboard.
     document.getElementById('loginView').innerHTML =
@@ -798,6 +876,7 @@ async function doLogin() {
     document.getElementById('adminEmail').textContent = r.admin.email;
     loadDashboard();
     loadApps();
+    refreshUptimeBadge_();
   } else {
     resetTurnstile();
     errEl.textContent = r.reason || 'Login failed';
@@ -839,10 +918,11 @@ function showPage(page) {
     if ((location.hash || '').slice(1) !== top && !PAGE_OWNER[page]) history.replaceState(null, '', '#' + top);
     try { if (window.parent !== window) window.parent.postMessage({ kind: 'support-page', page: top }, location.origin); } catch (e) {}
   }
-  ['Dashboard', 'Tickets', 'TicketDetail', 'Requests', 'RequestDetail', 'DevTracker', 'DevTree', 'Changelog', 'KoraHealth', 'KoraChatDetail', 'Tenants', 'Alerts', 'Settings'].forEach(p => {
+  ['Dashboard', 'Tickets', 'TicketDetail', 'Requests', 'RequestDetail', 'DevTracker', 'DevTree', 'Changelog', 'KoraHealth', 'KoraChatDetail', 'Tenants', 'Uptime', 'Alerts', 'Settings'].forEach(p => {
     document.getElementById('page' + p).classList.add('hidden');
   });
   document.querySelectorAll('.sidebar nav a').forEach(a => a.classList.remove('active'));
+  if (page !== 'uptime') stopUptimeTimers_();
 
   if (page === 'dashboard') {
     document.getElementById('pageDashboard').classList.remove('hidden');
@@ -885,6 +965,10 @@ function showPage(page) {
     document.getElementById('pageTenants').classList.remove('hidden');
     document.querySelector('[data-page=tenants]').classList.add('active');
     loadTenants();
+  } else if (page === 'uptime') {
+    document.getElementById('pageUptime').classList.remove('hidden');
+    document.querySelector('[data-page=uptime]').classList.add('active');
+    loadUptime();
   } else if (page === 'alerts') {
     document.getElementById('pageAlerts').classList.remove('hidden');
     document.querySelector('[data-page=alerts]').classList.add('active');
@@ -1615,6 +1699,221 @@ async function deleteTenant() {
     closeTenantDetail();
     loadTenants();
   }
+}
+
+// ── Uptime ────────────────────────────────────────────────────────────
+// The checks run on the server every 60s (lib/uptime.js); this page shows
+// them and ticks each site's clock locally every second between refreshes.
+const _up = { data: null, skew: 0, tick: null, refresh: null, editing: null, confirmDel: null };
+
+// "3d 04:12:37", or "04:12:37" under a day.
+// Mirror of formatClock in lib/uptime.js — keep identical (test/uptime.test.js checks both).
+function formatUptimeClock(ms) {
+  if (!Number.isFinite(ms) || ms < 0) ms = 0;
+  const s = Math.floor(ms / 1000);
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  const p = (n) => String(n).padStart(2, '0');
+  return (d > 0 ? d + 'd ' : '') + p(h) + ':' + p(m) + ':' + p(sec);
+}
+// "2h 5m", "45s". Mirror of formatDuration in lib/uptime.js.
+function formatUptimeDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) ms = 0;
+  const s = Math.round(ms / 1000);
+  if (s < 60) return s + 's';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + 'm' + (s % 60 ? ' ' + (s % 60) + 's' : '');
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + 'h' + (m % 60 ? ' ' + (m % 60) + 'm' : '');
+  const d = Math.floor(h / 24);
+  return d + 'd' + (h % 24 ? ' ' + (h % 24) + 'h' : '');
+}
+function escAttrUp_(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function upHost_(u) { try { return new URL(u).host; } catch (e) { return u || ''; } }
+function upNow_() { return Date.now() + _up.skew; }   // server time, so a wrong laptop clock can't skew the counters
+
+function stopUptimeTimers_() {
+  clearInterval(_up.tick); clearInterval(_up.refresh);
+  _up.tick = _up.refresh = null;
+}
+
+async function loadUptime() {
+  const r = await api('GET', '/api/uptime');
+  const grid = document.getElementById('uptimeGrid');
+  if (!r.ok) { grid.innerHTML = '<div class="card" style="color:var(--muted);">' + esc(r.reason || 'Could not load uptime.') + '</div>'; return; }
+  _up.data = r;
+  _up.skew = new Date(r.serverNow).getTime() - Date.now();
+  renderUptime_();
+  if (!_up.tick) _up.tick = setInterval(tickUptime_, 1000);
+  if (!_up.refresh) _up.refresh = setInterval(() => { if (_up.editing == null && _up.confirmDel == null) loadUptime(); }, 30000);
+}
+
+function upState_(s) {
+  if (s.paused) return { cls: '', pill: 'idle', label: 'Paused' };
+  if (s.status === 'down') return { cls: 'is-down', pill: 'down', label: 'Down' };
+  if (s.status === 'up' && s.consecutiveFailures > 0) return { cls: 'is-shaky', pill: 'shaky', label: s.consecutiveFailures + ' failed check' + (s.consecutiveFailures > 1 ? 's' : '') };
+  if (s.status === 'up') return { cls: 'is-up', pill: 'up', label: 'Up' };
+  return { cls: '', pill: 'idle', label: 'Checking' };
+}
+
+function upClockHtml_(s) {
+  if (s.paused) return '<span class="lead">Paused — not being checked</span>';
+  if (!s.statusSince || (s.status !== 'up' && s.status !== 'down')) return '<span class="lead">Waiting for the first check…</span>';
+  const since = new Date(s.statusSince).getTime();
+  return '<span class="lead">' + (s.status === 'down' ? 'Down for' : 'Up for') + '</span>' +
+    '<span data-up-since="' + since + '">' + formatUptimeClock(upNow_() - since) + '</span>';
+}
+
+function tickUptime_() {
+  if (CURRENT_PAGE !== 'uptime') return stopUptimeTimers_();
+  const now = upNow_();
+  document.querySelectorAll('#uptimeGrid [data-up-since]').forEach(el => {
+    el.textContent = formatUptimeClock(now - Number(el.getAttribute('data-up-since')));
+  });
+}
+
+function upPct_(v) { return v == null ? '—' : (v === 100 ? '100%' : v.toFixed(2) + '%'); }
+
+function upStripHtml_(history) {
+  return '<div class="up-strip">' + (history || []).map(b => {
+    const cls = !b.total ? '' : b.ok === b.total ? 'ok' : b.ok === 0 ? 'bad' : 'part';
+    const t = new Date(b.start).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    const tip = t + ' — ' + (b.total ? b.ok + '/' + b.total + ' checks ok' : 'no checks');
+    return '<span class="' + cls + '" title="' + escAttrUp_(tip) + '"></span>';
+  }).join('') + '</div><div class="up-strip-legend"><span>24h ago</span><span>now</span></div>';
+}
+
+function upIncidentHtml_(inc) {
+  if (!inc) return 'No incidents recorded';
+  const at = new Date(inc.startedAt).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  return 'Last incident: ' + esc(at) + ' · ' +
+    (inc.endedAt ? 'down ' + formatUptimeDuration(inc.durationMs) : '<b style="color:var(--danger);">ongoing</b>');
+}
+
+function upCardHtml_(s) {
+  const st = upState_(s);
+  if (_up.editing === s.id) {
+    return `<div class="up-card ${st.cls}">
+      <div><label class="up-lbl">Name</label><input id="upEditName" value="${escAttrUp_(s.name)}" style="width:100%;"></div>
+      <div><label class="up-lbl">URL to check</label><input id="upEditUrl" value="${escAttrUp_(s.url)}" style="width:100%;"></div>
+      <div class="up-foot">Changing the URL starts this site's history and clock fresh.</div>
+      <div class="up-actions">
+        <button class="btn btn-primary btn-sm" onclick="saveUptimeSite(${s.id})">Save</button>
+        <button class="btn btn-ghost btn-sm" onclick="_up.editing=null;renderUptime_()">Cancel</button>
+      </div>
+      <div id="upEditMsg" class="up-err"></div>
+    </div>`;
+  }
+  const checked = s.lastCheckedAt ? 'checked ' + timeAgo(s.lastCheckedAt) + (s.lastStatusCode ? ' · HTTP ' + s.lastStatusCode : '') : 'not checked yet';
+  const del = _up.confirmDel === s.id
+    ? `<span style="font-size:12px;align-self:center;">Remove this site and its history?</span>
+       <button class="btn btn-danger btn-sm" onclick="removeUptimeSite(${s.id})">Remove</button>
+       <button class="btn btn-ghost btn-sm" onclick="_up.confirmDel=null;renderUptime_()">Keep</button>`
+    : `<button class="btn btn-ghost btn-sm" onclick="_up.editing=${s.id};_up.confirmDel=null;renderUptime_()">Edit</button>
+       <button class="btn btn-ghost btn-sm" onclick="toggleUptimePause(${s.id}, ${!s.paused})">${s.paused ? 'Resume' : 'Pause'}</button>
+       <button class="btn btn-ghost btn-sm" onclick="_up.confirmDel=${s.id};_up.editing=null;renderUptime_()">Remove</button>`;
+  return `<div class="up-card ${st.cls}">
+    <div class="up-head">
+      <div style="flex:1;min-width:0;">
+        <div class="up-name">${esc(s.name)}</div>
+        <div class="up-host" title="${escAttrUp_(s.url)}">${esc(upHost_(s.url))}</div>
+      </div>
+      <span class="up-pill ${st.pill}">${esc(st.label)}</span>
+    </div>
+    <div class="up-clock ${s.status === 'down' && !s.paused ? 'down' : ''}">${upClockHtml_(s)}</div>
+    <div class="up-stats">
+      <div class="up-stat"><div class="k">24h</div><div class="v">${upPct_(s.uptime.h24)}</div></div>
+      <div class="up-stat"><div class="k">7 days</div><div class="v">${upPct_(s.uptime.d7)}</div></div>
+      <div class="up-stat"><div class="k">30 days</div><div class="v">${upPct_(s.uptime.d30)}</div></div>
+      <div class="up-stat"><div class="k">Response</div><div class="v">${s.lastResponseMs != null && s.lastOk ? s.lastResponseMs + ' ms' : '—'}</div></div>
+    </div>
+    ${upStripHtml_(s.history)}
+    ${s.lastOk === false && s.lastError ? '<div class="up-err">' + esc(s.lastError) + '</div>' : ''}
+    <div class="up-foot">${upIncidentHtml_(s.lastIncident)}<br>${esc(checked)}</div>
+    <div class="up-actions">${del}</div>
+  </div>`;
+}
+
+function renderUptime_() {
+  const r = _up.data; if (!r) return;
+  const grid = document.getElementById('uptimeGrid');
+  grid.innerHTML = r.sites.length ? r.sites.map(upCardHtml_).join('')
+    : '<div class="card empty-state" style="grid-column:1/-1;"><h3>No sites yet</h3><p>Add one below.</p></div>';
+
+  const watched = r.sites.filter(s => !s.paused);
+  const down = watched.filter(s => s.status === 'down').length;
+  document.getElementById('uptimeSummary').textContent =
+    (down ? down + ' of ' + watched.length + ' down' : 'All ' + watched.length + ' up') +
+    ' · checked every ' + r.intervalSeconds + 's · down after ' + r.downAfter + ' failures in a row';
+  setUptimeBadge_(down);
+
+  const sug = document.getElementById('uptimeSuggest');
+  sug.classList.toggle('hidden', !(r.suggestions || []).length);
+  document.getElementById('uptimeSuggestList').innerHTML = (r.suggestions || []).map((x, i) => `
+    <div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--border);font-size:13px;">
+      <span style="flex:1;min-width:0;"><b>${esc(x.name)}</b> <span style="color:var(--muted);">${esc(upHost_(x.url))}</span></span>
+      <button class="btn btn-ghost btn-sm" onclick="addUptimeSuggestion(${i})">Add</button>
+    </div>`).join('');
+
+  const alertEl = document.getElementById('uptimeAlertTo');
+  if (document.activeElement !== alertEl) alertEl.value = r.alertTo || '';
+  const msg = document.getElementById('uptimeAlertMsg');
+  if (!r.emailConfigured) { msg.textContent = 'Email is not configured on the server (RESEND_API_KEY unset) — alerts are recorded but not sent.'; msg.style.color = 'var(--danger)'; }
+}
+
+function setUptimeBadge_(n) {
+  const b = document.getElementById('uptimeBadge');
+  if (!b) return;
+  b.textContent = n; b.classList.toggle('hidden', !n);
+}
+// Down count for the menu badge, so an outage shows from any page.
+async function refreshUptimeBadge_() {
+  if (!canSee('uptime') || CURRENT_PAGE === 'uptime') return;
+  const r = await api('GET', '/api/uptime?summary=1').catch(() => null);
+  if (r && r.ok) setUptimeBadge_(r.down || 0);
+}
+
+async function addUptimeSite(name, url) {
+  const msg = document.getElementById('uptimeAddMsg');
+  const fromForm = name === undefined;
+  if (fromForm) { name = document.getElementById('uptimeNewName').value.trim(); url = document.getElementById('uptimeNewUrl').value.trim(); }
+  const r = await api('POST', '/api/uptime/sites', { name, url });
+  if (!r.ok) { msg.textContent = r.reason || 'Failed'; msg.style.color = 'var(--danger)'; return; }
+  if (fromForm) { document.getElementById('uptimeNewName').value = ''; document.getElementById('uptimeNewUrl').value = ''; }
+  msg.textContent = 'Added — first check running now.'; msg.style.color = 'var(--success)';
+  await loadUptime();
+  setTimeout(loadUptime, 12000);   // pick up the first result
+}
+function addUptimeSuggestion(i) {
+  const x = (_up.data && _up.data.suggestions || [])[i];
+  if (x) addUptimeSite(x.name, x.url);
+}
+
+async function saveUptimeSite(id) {
+  const r = await api('PATCH', '/api/uptime/sites/' + id, {
+    name: document.getElementById('upEditName').value.trim(),
+    url: document.getElementById('upEditUrl').value.trim(),
+  });
+  if (!r.ok) { document.getElementById('upEditMsg').textContent = r.reason || 'Failed'; return; }
+  _up.editing = null;
+  loadUptime();
+}
+async function toggleUptimePause(id, paused) {
+  await api('PATCH', '/api/uptime/sites/' + id, { paused });
+  loadUptime();
+}
+async function removeUptimeSite(id) {
+  await api('DELETE', '/api/uptime/sites/' + id);
+  _up.confirmDel = null;
+  loadUptime();
+}
+async function saveUptimeAlertTo() {
+  const msg = document.getElementById('uptimeAlertMsg');
+  const r = await api('POST', '/api/uptime/settings', { alertTo: document.getElementById('uptimeAlertTo').value });
+  msg.textContent = r.ok ? 'Saved.' : (r.reason || 'Failed');
+  msg.style.color = r.ok ? 'var(--success)' : 'var(--danger)';
+  if (r.ok) setTimeout(() => { msg.textContent = ''; }, 2000);
 }
 
 // ── Helpers ────────────────────────────────────────────────────────
@@ -2377,6 +2676,7 @@ function toggleTheme() {
 initTheme();
 checkAuth();
 if (!EMBED) initTurnstile();
+setInterval(() => { if (STATE.admin) refreshUptimeBadge_(); }, 60000);
 // The dashboard's menu moves between pages by changing our address.
 window.addEventListener('hashchange', () => {
   const h = (location.hash || '').slice(1);

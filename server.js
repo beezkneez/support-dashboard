@@ -58,20 +58,26 @@ function getResend() {
   return new Resend(process.env.RESEND_API_KEY);
 }
 
+// Resolves true when Resend accepted it, false otherwise -- never throws.
+// Existing callers ignore the result; the uptime monitor records it.
 async function sendMail({ to, subject, html, replyTo }) {
   const resend = getResend();
-  if (!resend) { console.log('[email] Resend not configured, skipping'); return; }
+  if (!resend) { console.log('[email] Resend not configured, skipping'); return false; }
   try {
-    await resend.emails.send({
+    const r = await resend.emails.send({
       from: process.env.RESEND_FROM || 'Support <support@example.com>',
       to: Array.isArray(to) ? to : [to],
       subject,
       html,
       replyTo
     });
+    // resend v3 reports API errors in the result rather than throwing.
+    if (r && r.error) { console.error('[email] Failed:', r.error.message || r.error); return false; }
     console.log(`[email] Sent to ${to}: ${subject}`);
+    return true;
   } catch(e) {
     console.error('[email] Failed:', e.message);
+    return false;
   }
 }
 
@@ -680,6 +686,70 @@ async function initDB() {
         }
         console.log(`[init] Dev tracker starter cards seeded (${cardCount})`);
       }
+    }
+
+    // ── Uptime monitor (lib/uptime.js) ─────────────────────────────────
+    // The site list is data, edited on the Uptime page, not a list in code.
+    // State (status, since when, failure streak) sits on the site row so a
+    // restart keeps the running clock and never re-sends an alert.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS uptime_sites (
+        id                   SERIAL PRIMARY KEY,
+        name                 TEXT NOT NULL,
+        url                  TEXT NOT NULL,
+        paused               BOOLEAN NOT NULL DEFAULT FALSE,
+        sort_order           INTEGER NOT NULL DEFAULT 0,
+        status               TEXT NOT NULL DEFAULT 'unknown',
+        status_since         TIMESTAMPTZ,
+        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+        first_fail_at        TIMESTAMPTZ,
+        last_checked_at      TIMESTAMPTZ,
+        last_ok              BOOLEAN,
+        last_status_code     INTEGER,
+        last_response_ms     INTEGER,
+        last_error           TEXT,
+        created_at           TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    // Raw results, pruned to 30 days by the monitor (~1440 rows/site/day).
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS uptime_checks (
+        id          BIGSERIAL PRIMARY KEY,
+        site_id     INTEGER NOT NULL REFERENCES uptime_sites(id) ON DELETE CASCADE,
+        checked_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        ok          BOOLEAN NOT NULL,
+        status_code INTEGER,
+        response_ms INTEGER,
+        error       TEXT
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_uptime_checks_site_time ON uptime_checks (site_id, checked_at DESC)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_uptime_checks_time ON uptime_checks (checked_at)`);
+    // One row per outage: opened on the down transition, closed on recovery.
+    // Kept indefinitely -- a few rows a year.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS uptime_incidents (
+        id            SERIAL PRIMARY KEY,
+        site_id       INTEGER NOT NULL REFERENCES uptime_sites(id) ON DELETE CASCADE,
+        started_at    TIMESTAMPTZ NOT NULL,
+        ended_at      TIMESTAMPTZ,
+        error         TEXT,
+        status_code   INTEGER,
+        down_email_ok BOOLEAN,
+        up_email_ok   BOOLEAN
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_uptime_incidents_site ON uptime_incidents (site_id, started_at DESC)`);
+    await client.query(`CREATE TABLE IF NOT EXISTS uptime_settings (key TEXT PRIMARY KEY, value TEXT)`);
+    // Seed once. The marker (not "table is empty") is what stops a re-seed,
+    // so removing every site on the page stays removed after a restart.
+    const uptimeSeeded = await client.query(`SELECT 1 FROM uptime_settings WHERE key='seeded'`);
+    if (uptimeSeeded.rows.length === 0) {
+      for (const [i, s] of uptimeSeedSites().entries()) {
+        await client.query(`INSERT INTO uptime_sites (name, url, sort_order) VALUES ($1,$2,$3)`, [s.name, s.url, i]);
+      }
+      await client.query(`INSERT INTO uptime_settings (key, value) VALUES ('seeded', NOW()::text) ON CONFLICT (key) DO NOTHING`);
+      console.log('[init] Uptime sites seeded');
     }
 
     console.log('[init] Database ready');
@@ -2898,6 +2968,214 @@ app.delete('/api/tenants/:id', requireAdmin, async (req, res) => {
   }
 });
 
+// ── Uptime monitor ──────────────────────────────────────────────────
+// Checker + rules live in lib/uptime.js; this is the page's API and the seed.
+const uptime = require('./lib/uptime');
+
+// Spawns are checked at /api/known-features: public, no auth, no database,
+// ~2.5 KB of static JSON. Their "/" also works but is the whole ~6.6 MB staff
+// app — once a minute per site that is gigabytes a day for no extra signal.
+const UPTIME_SPAWN_PATH = '/api/known-features';
+const UPTIME_DEFAULT_ALERT_TO = 'admin@kronara.app';
+function uptimeSelfUrl() {
+  const u = String(process.env.DASHBOARD_URL || '').replace(/\/+$/, '');
+  return /^https:\/\//i.test(u) ? u : 'https://support-dashboard-production-72c8.up.railway.app';
+}
+function uptimeSeedSites() {
+  return [
+    { name: 'Aradia (production)', url: 'https://aradiafitness.app' + UPTIME_SPAWN_PATH },
+    { name: 'Staging',             url: 'https://staging.kronara.app' + UPTIME_SPAWN_PATH },
+    { name: 'Demo',                url: 'https://demo.kronara.app' + UPTIME_SPAWN_PATH },
+    { name: 'Support dashboard',   url: uptimeSelfUrl() + '/health' },
+  ];
+}
+async function getUptimeAlertTo() {
+  const r = await pool.query(`SELECT value FROM uptime_settings WHERE key='alert_to'`).catch(() => ({ rows: [] }));
+  const v = r.rows[0] ? String(r.rows[0].value || '').trim() : '';
+  if (r.rows[0]) return v ? v.split(',').map(s => s.trim()).filter(Boolean) : null;  // saved empty = alerts off
+  return (process.env.UPTIME_ALERT_EMAIL || UPTIME_DEFAULT_ALERT_TO).split(',').map(s => s.trim()).filter(Boolean);
+}
+const uptimeMonitor = uptime.createMonitor({
+  pool, sendMail, getAlertTo: getUptimeAlertTo,
+  dashboardUrl: uptimeSelfUrl(),
+});
+
+function uptimeUrlOk(u) {
+  try { const x = new URL(String(u)); return x.protocol === 'https:' || x.protocol === 'http:'; } catch (e) { return false; }
+}
+// Every studio at once, so: not for someone the Kronara dashboard has limited
+// to certain studios, and only for bridged people whose pages include it.
+async function requireUptime(req, res, next) {
+  await requireAdmin(req, res, () => {
+    if (req.viaDashboard) {
+      if (bridgeScope(req)) return res.status(404).json({ ok: false, reason: 'Not found' });
+      const pages = String(req.headers['x-operator-pages'] || '').split(',').map(s => s.trim());
+      if (req.headers['x-operator-role'] !== 'admin' && !pages.includes('uptime'))
+        return res.status(403).json({ ok: false, reason: 'Not allowed' });
+    }
+    next();
+  });
+}
+
+app.get('/api/uptime', requireUptime, async (req, res) => {
+  try {
+    if (req.query.summary) {
+      // Menu badge: polled every minute from any page, so keep it to one cheap read.
+      const r = await pool.query(`SELECT COUNT(*) AS n FROM uptime_sites WHERE status='down' AND NOT paused`);
+      return res.json({ ok: true, down: parseInt(r.rows[0].n, 10) || 0 });
+    }
+    const sites = (await pool.query(`SELECT * FROM uptime_sites ORDER BY sort_order, id`)).rows;
+    const stats = (await pool.query(`
+      SELECT site_id,
+             COUNT(*) FILTER (WHERE checked_at > NOW() - INTERVAL '24 hours')            AS total_24h,
+             COUNT(*) FILTER (WHERE checked_at > NOW() - INTERVAL '24 hours' AND ok)     AS ok_24h,
+             COUNT(*) FILTER (WHERE checked_at > NOW() - INTERVAL '7 days')              AS total_7d,
+             COUNT(*) FILTER (WHERE checked_at > NOW() - INTERVAL '7 days' AND ok)       AS ok_7d,
+             COUNT(*)                                                                    AS total_30d,
+             COUNT(*) FILTER (WHERE ok)                                                  AS ok_30d
+        FROM uptime_checks WHERE checked_at > NOW() - INTERVAL '30 days'
+       GROUP BY site_id`)).rows;
+    const hours = (await pool.query(`
+      SELECT site_id, date_trunc('hour', checked_at) AS hour, COUNT(*) AS total, COUNT(*) FILTER (WHERE ok) AS ok
+        FROM uptime_checks WHERE checked_at > NOW() - INTERVAL '24 hours'
+       GROUP BY 1, 2`)).rows;
+    const lastInc = (await pool.query(`
+      SELECT DISTINCT ON (site_id) site_id, started_at, ended_at, error, status_code
+        FROM uptime_incidents ORDER BY site_id, started_at DESC`)).rows;
+    const statBy = new Map(stats.map(r => [r.site_id, r]));
+    const incBy = new Map(lastInc.map(r => [r.site_id, r]));
+    const now = Date.now();
+
+    // Spawns the dashboard has heard from (directory + recent tickets) that
+    // nobody is watching yet, offered as one-click adds on the page.
+    const monitoredHosts = new Set(sites.map(s => hostOf(s.url)));
+    const known = (await pool.query(`
+      SELECT name, base_url AS url FROM tenants WHERE COALESCE(base_url,'') <> ''
+      UNION ALL
+      SELECT name, member_url FROM tenants WHERE member_url ~* '^https?://[^/]+/?$'
+      UNION ALL
+      SELECT MAX(COALESCE(NULLIF(spawn_name,''), spawn, '')), callback_url FROM tickets
+       WHERE COALESCE(callback_url,'') <> '' AND created_at > NOW() - INTERVAL '90 days'
+       GROUP BY callback_url`)).rows;
+    const suggestions = [], seen = new Set();
+    for (const k of known) {
+      let origin; try { origin = new URL(k.url).origin; } catch (e) { continue; }
+      const host = hostOf(origin);
+      if (!host || /^(localhost|127\.|0\.0\.0\.0)/.test(host) || monitoredHosts.has(host) || seen.has(host)) continue;
+      seen.add(host);
+      suggestions.push({ name: k.name || host, url: origin + UPTIME_SPAWN_PATH });
+    }
+
+    const alertTo = await getUptimeAlertTo();
+    res.json({
+      ok: true,
+      serverNow: new Date(now).toISOString(),
+      intervalSeconds: Math.round(uptime.INTERVAL_MS / 1000),
+      downAfter: uptime.DOWN_AFTER,
+      alertTo: (alertTo || []).join(', '),
+      emailConfigured: !!process.env.RESEND_API_KEY,
+      suggestions,
+      sites: sites.map(s => {
+        const st = statBy.get(s.id) || {};
+        const inc = incBy.get(s.id);
+        return {
+          id: s.id, name: s.name, url: s.url, paused: s.paused,
+          status: s.status, statusSince: s.status_since,
+          consecutiveFailures: s.consecutive_failures,
+          lastCheckedAt: s.last_checked_at, lastOk: s.last_ok, lastStatusCode: s.last_status_code,
+          lastResponseMs: s.last_response_ms, lastError: s.last_error,
+          uptime: {
+            h24: uptime.uptimePct(st.ok_24h, st.total_24h),
+            d7: uptime.uptimePct(st.ok_7d, st.total_7d),
+            d30: uptime.uptimePct(st.ok_30d, st.total_30d),
+          },
+          history: uptime.fillHourBuckets(hours.filter(h => h.site_id === s.id), now),
+          lastIncident: inc ? {
+            startedAt: inc.started_at, endedAt: inc.ended_at, error: inc.error,
+            durationMs: (inc.ended_at ? new Date(inc.ended_at).getTime() : now) - new Date(inc.started_at).getTime(),
+          } : null,
+        };
+      }),
+    });
+  } catch (e) {
+    console.error('[uptime]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+app.post('/api/uptime/sites', requireUptime, async (req, res) => {
+  try {
+    const name = String(req.body.name || '').trim().slice(0, 80);
+    const url = String(req.body.url || '').trim();
+    if (!name) return res.json({ ok: false, reason: 'Name required' });
+    if (!uptimeUrlOk(url)) return res.json({ ok: false, reason: 'URL must start with http:// or https://' });
+    const order = (await pool.query(`SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM uptime_sites`)).rows[0].n;
+    const row = (await pool.query(`INSERT INTO uptime_sites (name, url, sort_order) VALUES ($1,$2,$3) RETURNING id`, [name, url, order])).rows[0];
+    uptimeMonitor.runOnce();   // first result now rather than in up to a minute
+    res.json({ ok: true, id: row.id });
+  } catch (e) {
+    console.error('[uptime]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+app.patch('/api/uptime/sites/:id', requireUptime, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const cur = (await pool.query(`SELECT * FROM uptime_sites WHERE id=$1`, [id])).rows[0];
+    if (!cur) return res.json({ ok: false, reason: 'Not found' });
+    const sets = [], params = [id];
+    if (req.body.name !== undefined) {
+      const name = String(req.body.name || '').trim().slice(0, 80);
+      if (!name) return res.json({ ok: false, reason: 'Name required' });
+      params.push(name); sets.push(`name=$${params.length}`);
+    }
+    if (req.body.paused !== undefined) { params.push(!!req.body.paused); sets.push(`paused=$${params.length}`); }
+    const urlChanged = req.body.url !== undefined && String(req.body.url).trim() !== cur.url;
+    if (urlChanged) {
+      const url = String(req.body.url).trim();
+      if (!uptimeUrlOk(url)) return res.json({ ok: false, reason: 'URL must start with http:// or https://' });
+      params.push(url); sets.push(`url=$${params.length}`);
+      // A different address is a different thing being watched: start its
+      // clock fresh, and close any outage that belonged to the old one.
+      sets.push(`status='unknown'`, `status_since=NULL`, `consecutive_failures=0`, `first_fail_at=NULL`);
+    }
+    if (!sets.length) return res.json({ ok: true });
+    await pool.query(`UPDATE uptime_sites SET ${sets.join(', ')} WHERE id=$1`, params);
+    if (urlChanged) {
+      await pool.query(`UPDATE uptime_incidents SET ended_at=NOW() WHERE site_id=$1 AND ended_at IS NULL`, [id]);
+      uptimeMonitor.runOnce();
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[uptime]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+app.delete('/api/uptime/sites/:id', requireUptime, async (req, res) => {
+  try {
+    await pool.query(`DELETE FROM uptime_sites WHERE id=$1`, [parseInt(req.params.id, 10)]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[uptime]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
+app.post('/api/uptime/settings', requireUptime, async (req, res) => {
+  try {
+    const list = String(req.body.alertTo || '').split(',').map(s => s.trim()).filter(Boolean);
+    if (list.some(e => !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e))) return res.json({ ok: false, reason: 'Enter valid email addresses, separated by commas' });
+    await pool.query(`INSERT INTO uptime_settings (key, value) VALUES ('alert_to', $1)
+                      ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value`, [list.join(', ')]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[uptime]', e);
+    res.json({ ok: false, reason: 'Server error' });
+  }
+});
+
 // ── Inbound Email Webhook (Resend) ──────────────────────────────────
 app.post('/api/inbound-email', async (req, res) => {
   try {
@@ -2937,7 +3215,11 @@ app.get('*', (req, res) => {
 const PORT = process.env.PORT || 4500;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Support Dashboard running on port ${PORT}`);
-  initDB().catch(e => {
+  initDB().then(() => {
+    // UPTIME_MONITOR=off for a local run pointed at the real database, so it
+    // doesn't check (and email) alongside production.
+    if (String(process.env.UPTIME_MONITOR || '').toLowerCase() !== 'off') uptimeMonitor.start();
+  }).catch(e => {
     console.error('Failed to initialize database:', e);
   });
 });
