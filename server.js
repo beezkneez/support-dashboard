@@ -425,6 +425,7 @@ async function initDB() {
     await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS push_user_reply BOOLEAN DEFAULT TRUE`).catch(()=>{});
     await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS email_new_ticket BOOLEAN DEFAULT TRUE`).catch(()=>{});
     await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS push_new_feature_request BOOLEAN DEFAULT TRUE`).catch(()=>{});
+    await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS push_uptime BOOLEAN DEFAULT TRUE`).catch(()=>{});
     // Support pages this person may open, as last reported by the Kronara
     // dashboard ("tickets,requests"). NULL = everything (admins, and anyone
     // who signs in here directly). Used to keep push to what they can see.
@@ -1768,9 +1769,9 @@ async function pushToAdmins(title, body, url, category, studioUrl) {
   try {
     // Preference is per admin, per category. An admin with push off for a
     // category simply has no rows returned for it.
-    const col = { ticket: 'push_new_ticket', reply: 'push_user_reply', feature_request: 'push_new_feature_request' }[category] || null;
+    const col = { ticket: 'push_new_ticket', reply: 'push_user_reply', feature_request: 'push_new_feature_request', uptime: 'push_uptime' }[category] || null;
     // Dashboard staff only hear about what they can open.
-    const need = { ticket: ['tickets'], reply: ['tickets', 'requests'], feature_request: ['requests'] }[category] || null;
+    const need = { ticket: ['tickets'], reply: ['tickets', 'requests'], feature_request: ['requests'], uptime: ['uptime'] }[category] || null;
     const pageOk = need
       ? `(a.dashboard_pages IS NULL OR string_to_array(a.dashboard_pages, ',') && ARRAY[${need.map(n => `'${n}'`).join(',')}]::text[])`
       : 'TRUE';
@@ -1857,6 +1858,7 @@ app.get('/api/push/devices', requireAdmin, async (req, res) => {
     const a = await pool.query(
       `SELECT COALESCE(push_new_ticket,TRUE) AS push_new_ticket,
               COALESCE(push_user_reply,TRUE) AS push_user_reply,
+              COALESCE(push_uptime,TRUE) AS push_uptime,
               COALESCE(email_new_ticket,TRUE) AS email_new_ticket
          FROM admin_users WHERE id=$1`, [req.admin.id]);
     res.json({ ok: true, enabled: PUSH_READY, devices: r.rows, prefs: a.rows[0] || {} });
@@ -1869,7 +1871,7 @@ app.get('/api/push/devices', requireAdmin, async (req, res) => {
 // new ticket but not an email, or both, or neither while you are away.
 app.post('/api/push/prefs', requireAdmin, async (req, res) => {
   try {
-    const allowed = ['push_new_ticket', 'push_user_reply', 'email_new_ticket'];
+    const allowed = ['push_new_ticket', 'push_user_reply', 'push_uptime', 'email_new_ticket'];
     const sets = [], vals = [];
     for (const k of allowed) {
       if (typeof req.body[k] === 'boolean') { sets.push(`${k}=$${sets.length + 1}`); vals.push(req.body[k]); }
@@ -2997,6 +2999,9 @@ async function getUptimeAlertTo() {
 }
 const uptimeMonitor = uptime.createMonitor({
   pool, sendMail, getAlertTo: getUptimeAlertTo,
+  // Every site at once, so only people who can open the Uptime page hear it
+  // (pushToAdmins' page and studio-limit checks), and each can mute it.
+  notify: ({ title, body }) => pushToAdmins(title, body, '/#uptime', 'uptime', null),
   dashboardUrl: uptimeSelfUrl(),
 });
 

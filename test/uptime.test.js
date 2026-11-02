@@ -183,8 +183,10 @@ eq(U.uptimePct(0, 10), 0, "pct: all failed");
   };
   const pool = { query: q, connect: async () => ({ query: q, release() {} }) };
   const script = [];
+  const pushes = [];
   const mon = U.createMonitor({
     pool, dashboardUrl: "https://dash.example",
+    notify: async (m) => { pushes.push(m); },
     sendMail: async (m) => { mails.push(m); return true; },
     getAlertTo: async () => ["admin@kronara.app"],
     fetchImpl: async () => resp(script.shift()),
@@ -207,6 +209,8 @@ eq(U.uptimePct(0, 10), 0, "pct: all failed");
   ok(incidents[0].ended_at && incidents[0].down_ok === true && incidents[0].up_ok === true, "monitor: incident closed, both emails recorded as sent");
   await run(200, 200);
   eq(mails.length, 2, "monitor: back to normal, quiet");
+  eq(pushes.map(p => p.kind), ["down", "up"], "monitor: one push when it goes down, one when it is back");
+  ok(/^DOWN: Aradia/.test(pushes[0].title) && /after .* down/.test(pushes[1].body), "monitor: push says which site and how long", pushes[1].body);
   eq(checks.length, 13, "monitor: every check recorded");
 
   lockFree = false;
