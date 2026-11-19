@@ -526,6 +526,18 @@
           <span id="clStatus" style="font-size:12px;color:var(--muted);"></span>
         </div>
       </div>
+      <!-- Import a batch of drafted entries (a .json array of { title, category,
+           audience, versionLabel, body[] }); they land as drafts to read first. -->
+      <div class="card" style="margin-bottom:16px;">
+        <div style="font-weight:700;font-size:13px;margin-bottom:6px;">Import entries from a file</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:8px;">Pick a .json file of entries. They're added to the app selected above as drafts: nothing reaches staff until you publish.</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+          <input type="file" id="clImportFile" accept=".json,application/json">
+          <button class="btn" onclick="importChangelogEntries_()">Import as drafts</button>
+          <button class="btn" onclick="publishAllChangelogDrafts_()">Publish all drafts</button>
+          <span id="clImportStatus" style="font-size:12px;color:var(--muted);"></span>
+        </div>
+      </div>
       <div id="changelogList" class="card" style="padding:0;overflow:hidden;"></div>
     </div>
 
@@ -2515,6 +2527,40 @@ async function loadChangelogApps_(){
   const prev = sel.value;
   sel.innerHTML = (STATE.apps || []).map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('');
   if (prev && (STATE.apps || []).some(a => String(a.id) === prev)) sel.value = prev;
+  loadChangelogList_();
+}
+// Import drafted entries from a .json file (array, newest first). Saved oldest
+// first so the list (newest first by date) keeps the file's order.
+async function importChangelogEntries_(){
+  const st = document.getElementById('clImportStatus');
+  const appId = document.getElementById('clAppSelect').value;
+  const f = document.getElementById('clImportFile').files[0];
+  if (!appId) { st.textContent = 'Pick an app first.'; return; }
+  if (!f) { st.textContent = 'Choose a .json file first.'; return; }
+  let list;
+  try { list = JSON.parse(await f.text()); } catch (e) { st.textContent = "That file isn't valid JSON."; return; }
+  if (!Array.isArray(list) || !list.length) { st.textContent = 'No entries in that file.'; return; }
+  let done = 0, failed = 0;
+  for (const e of list.slice().reverse()) {
+    if (!e || !e.title) { failed++; continue; }
+    st.textContent = 'Importing ' + (done + failed + 1) + ' of ' + list.length + '…';
+    const r = await api('POST', '/api/changelog', { appId: parseInt(appId, 10), versionLabel: e.versionLabel || '', title: e.title,
+      body: Array.isArray(e.body) ? e.body : [], category: e.category || '', audience: e.audience === 'admin' ? 'admin' : 'all' });
+    if (r && r.ok) done++; else failed++;
+  }
+  st.textContent = done + ' imported as drafts' + (failed ? ', ' + failed + ' failed' : '') + '. Read them below, then publish.';
+  document.getElementById('clImportFile').value = '';
+  loadChangelogList_();
+}
+// Publish (not announce) every draft for the selected app.
+async function publishAllChangelogDrafts_(){
+  const st = document.getElementById('clImportStatus');
+  const drafts = (_clEntries || []).filter(e => !e.published);
+  if (!drafts.length) { st.textContent = 'No drafts to publish.'; return; }
+  if (!confirm('Publish ' + drafts.length + ' draft' + (drafts.length === 1 ? '' : 's') + '? Staff will see them in What’s New. Nobody is notified.')) return;
+  let n = 0;
+  for (const e of drafts) { const r = await api('POST', '/api/changelog/' + encodeURIComponent(e.id) + '/publish', {}); if (r && r.ok) n++; }
+  st.textContent = n + ' published.';
   loadChangelogList_();
 }
 async function loadChangelogList_(){

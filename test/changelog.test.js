@@ -35,6 +35,15 @@ const ok = (c, label, detail) => {
   ok(/AND \$\{audClause\}\$\{catClause\}/.test(hook), "...on top of the app and audience rules");
 }
 
+// ── Import a file of drafted entries; publish all drafts (never announce) ──
+{
+  ok(html.includes('id="clImportFile"') && html.includes("async function importChangelogEntries_()"), "the Changelog page can import a .json file of entries");
+  const imp = html.slice(html.indexOf("async function importChangelogEntries_()"), html.indexOf("async function publishAllChangelogDrafts_()"));
+  ok(imp.includes("api('POST', '/api/changelog', {") && !imp.includes("/publish") && !imp.includes("/announce"), "imported entries are drafts: nothing published or announced");
+  const pub = html.slice(html.indexOf("async function publishAllChangelogDrafts_()"), html.indexOf("async function loadChangelogList_()"));
+  ok(pub.includes("/publish") && !pub.includes("/announce") && pub.includes("confirm("), "Publish all drafts asks first and never announces");
+}
+
 // ── Spawn-facing reads are scoped per app, additive for admins ──────────
 {
   const i = server.indexOf("app.post('/api/hooks/getChangelogEntries'");
