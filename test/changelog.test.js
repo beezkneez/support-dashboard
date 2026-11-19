@@ -26,6 +26,15 @@ const ok = (c, label, detail) => {
   ok(bad.length === 0, "every inline script still parses", bad.join(" | "));
 }
 
+// ── Marking read can be limited to one category (a page per area) ───────
+{
+  const i = server.indexOf("app.post('/api/hooks/markChangelogsRead'");
+  const hook = server.slice(i, server.indexOf("app.post(", i + 10));
+  ok(/const \{ email, seeAdmin, spawn, category, notCategory \}/.test(hook), "markChangelogsRead takes an optional category / notCategory");
+  ok(/catClause = ` AND COALESCE\(category,''\)=\$4`/.test(hook) && /catClause = ` AND COALESCE\(category,''\)<>\$4`/.test(hook), "only that category's entries, or all but it");
+  ok(/AND \$\{audClause\}\$\{catClause\}/.test(hook), "...on top of the app and audience rules");
+}
+
 // ── Spawn-facing reads are scoped per app, additive for admins ──────────
 {
   const i = server.indexOf("app.post('/api/hooks/getChangelogEntries'");

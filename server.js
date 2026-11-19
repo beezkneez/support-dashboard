@@ -1116,16 +1116,23 @@ app.post('/api/hooks/getChangelogEntries', requireApiKey, async (req, res) => {
 
 app.post('/api/hooks/markChangelogsRead', requireApiKey, async (req, res) => {
   try {
-    const { email, seeAdmin, spawn } = req.body || {};
+    const { email, seeAdmin, spawn, category, notCategory } = req.body || {};
     if (!email) return res.json({ ok: false, reason: 'email required' });
     let audClause = `audience='all'`;
     if (seeAdmin) audClause = `(audience='all' OR audience='admin')`;
+    // Optional: only one category's entries (category), or all but one
+    // (notCategory) -- a staff app with a page per area (e.g. Booking's own
+    // What's new) marks only what that page showed. Neither = everything.
+    const params = [req.app.id, email, spawn || null];
+    let catClause = '';
+    if (category) { params.push(String(category)); catClause = ` AND COALESCE(category,'')=$4`; }
+    else if (notCategory) { params.push(String(notCategory)); catClause = ` AND COALESCE(category,'')<>$4`; }
     await pool.query(
       `INSERT INTO changelog_reads (app_id, user_email, entry_id, spawn)
        SELECT app_id, LOWER($2), id, $3 FROM changelog_entries
-       WHERE app_id=$1 AND published=TRUE AND ${audClause}
+       WHERE app_id=$1 AND published=TRUE AND ${audClause}${catClause}
        ON CONFLICT DO NOTHING`,
-      [req.app.id, email, spawn || null]
+      params
     );
     res.json({ ok: true });
   } catch(e) {
