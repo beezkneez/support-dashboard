@@ -346,6 +346,7 @@
       <a href="#" data-page="korahealth" onclick="showPage('korahealth')">
         <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="6" width="10" height="8" rx="2"/><path d="M8 6V3M6 3h4"/><circle cx="6" cy="10" r="1"/><circle cx="10" cy="10" r="1"/></svg>
         Kora Health
+        <span id="koraBadge" class="badge hidden" title="Kora issues: out-of-date help topics + thumbs-down answers this week">0</span>
       </a>
       <a href="#" data-page="tenants" onclick="showPage('tenants')">
         <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h12M2 7h12M2 11h8"/><circle cx="14" cy="11" r="2"/></svg>
@@ -820,7 +821,8 @@ async function checkAuth() {
     if (EMBED) showPage((location.hash || '').slice(1) || 'dashboard');
     // The down/recovered emails link straight to #uptime.
     else if (location.hash === '#uptime') showPage('uptime');
-    refreshUptimeBadge_();
+    else if (location.hash === '#korahealth') showPage('korahealth');
+    refreshUptimeBadge_(); refreshKoraBadge_();
   } else if (EMBED) {
     // Never show our own password form inside the dashboard.
     document.getElementById('loginView').innerHTML =
@@ -876,7 +878,7 @@ async function doLogin() {
     document.getElementById('adminEmail').textContent = r.admin.email;
     loadDashboard();
     loadApps();
-    refreshUptimeBadge_();
+    refreshUptimeBadge_(); refreshKoraBadge_();
   } else {
     resetTurnstile();
     errEl.textContent = r.reason || 'Login failed';
@@ -1467,15 +1469,23 @@ async function loadKoraHealth() {
         </div>`;
     }
     const bad = a.bad || [], stale = a.driftStale || [];
+    // Loud when something needs doing (2026-11-19): coloured pills, and the
+    // out-of-date topics listed with what to do, not hidden in a tooltip.
+    const pill = (on, color, text) => `<span style="display:inline-block;padding:3px 10px;border-radius:999px;font-weight:700;font-size:12.5px;${on ? `background:${color};color:#fff;` : 'background:var(--accent-light);color:var(--muted);'}">${text}</span>`;
     const header = `
-      <div class="ticket-row" style="cursor:default;">
+      <div class="ticket-row" style="cursor:default;${(stale.length || a.badCount7d) ? 'border-left:4px solid var(--warn);' : ''}">
         <span class="app-dot" style="background:${a.color || '#6366f1'}"></span>
-        <div class="subject">${esc(a.name)}</div>
-        <div class="meta">
-          <span class="${a.badCount7d > 0 ? 'text-warn' : ''}">👎 ${a.badCount7d} this week</span>
-          <span class="${stale.length > 0 ? 'text-warn' : ''}" title="${stale.map(esc).join(', ')}">📚 ${stale.length} topic${stale.length === 1 ? '' : 's'} stale</span>
+        <div class="subject">${esc(a.name)}${(stale.length || a.badCount7d) ? '' : ' <span style="color:var(--success);font-weight:600;">✓ all good</span>'}</div>
+        <div class="meta" style="display:flex;gap:6px;flex-wrap:wrap;">
+          ${pill(a.badCount7d > 0, 'var(--danger)', '👎 ' + a.badCount7d + ' thumbs-down this week')}
+          ${pill(stale.length > 0, 'var(--warn)', '📚 ' + stale.length + ' help topic' + (stale.length === 1 ? '' : 's') + ' out of date')}
         </div>
-      </div>`;
+      </div>`
+      + (stale.length ? `
+      <div style="margin:0 0 10px 32px;padding:10px 14px;border:1px solid var(--warn);border-radius:var(--radius);font-size:13px;">
+        <b>Out of date:</b> ${stale.map(t => esc(String(t).replace(/\.md$/, ''))).join(', ')}
+        <div style="color:var(--muted);margin-top:4px;">The code behind these changed after they were written, so Kora may give wrong answers about them. Ask Claude to rewrite them (<code>npm run kb:regen</code>), or mark them still correct (<code>npm run kb:drift -- --reseed</code>), then deploy.</div>
+      </div>` : '');
     const rows = bad.map(b => `
       <div class="ticket-row" style="padding-left:32px;" onclick="openKoraChat(${a.id},${b.session_id})">
         <div class="subject">
@@ -1485,6 +1495,9 @@ async function loadKoraHealth() {
       </div>`).join('');
     return header + rows;
   }).join('');
+  // The menu badge follows what this page just found.
+  const kb = document.getElementById('koraBadge');
+  if (kb) { const n = r.apps.reduce((t, a) => t + (a.ok ? (a.driftStale || []).length + (a.badCount7d || 0) : 0), 0); kb.textContent = n; kb.classList.toggle('hidden', !n); }
 }
 
 let _koraChatCtx = null; // last loaded chat, for the "queue a fix" button
@@ -1861,6 +1874,18 @@ function renderUptime_() {
   const msg = document.getElementById('uptimeAlertMsg');
   if (!r.emailConfigured) { msg.textContent = 'Email is not configured on the server (RESEND_API_KEY unset) — alerts are recorded but not sent.'; msg.style.color = 'var(--danger)'; }
 }
+
+// Kora issues for the menu badge, from the hourly check (so it shows from any
+// page, and opening the menu never calls every studio).
+async function refreshKoraBadge_() {
+  if (!canSee('korahealth')) return;
+  const r = await api('GET', '/api/koraHealth?summary=1').catch(() => null);
+  const b = document.getElementById('koraBadge');
+  if (!b || !r || !r.ok) return;
+  const n = (r.stale || 0) + (r.bad || 0);
+  b.textContent = n; b.classList.toggle('hidden', !n);
+}
+setInterval(function () { if (document.visibilityState === 'visible') refreshKoraBadge_(); }, 15 * 60 * 1000);
 
 function setUptimeBadge_(n) {
   const b = document.getElementById('uptimeBadge');
@@ -2732,6 +2757,7 @@ async function loadPushSettings() {
     row('push_new_ticket', 'Push me when a ticket arrives', 'Any studio you can see — this is the one that matters.') +
     row('push_user_reply', 'Push me when someone replies', 'A reply on a ticket you are already in.') +
     (canSee('uptime') ? row('push_uptime', 'Push me when a site goes down', 'And again when it is back up. Same moments as the uptime emails.') : '') +
+    (canSee('korahealth') ? row('push_kora', 'Push me when Kora needs attention', 'New thumbs-down answers, or help topics that went out of date (checked hourly; a weekly reminder while they stay out of date).') : '') +
     row('email_new_ticket', 'Email me as well', 'Independent of push. Off means push only.') +
     (r.enabled ? '' : '<p style="font-size:12.5px;color:var(--danger,#b91c1c);margin-top:8px;">Push is not configured on the server (VAPID keys unset) — email only until it is.</p>');
 
