@@ -2768,7 +2768,7 @@ async function koraHealthFor(a) {
   return { ...base, ok: true, badCount7d: r.badCount7d || 0, bad: r.bad || [], driftStale: r.driftStale || [] };
 }
 
-// The hourly check (2026-11-19): ask every studio, keep the reading, push to
+// The daily check (2026-11-19, 5pm): ask every studio, keep the reading, push to
 // admins who can open Kora Health when it gets worse (lib/koraAlert.js).
 async function koraHealthCheckAll() {
   const client = await pool.connect();
@@ -2799,7 +2799,7 @@ async function koraHealthCheckAll() {
 
 app.get('/api/koraHealth', requireAdmin, async (req, res) => {
   try {
-    // The menu badge: the last hourly reading, no calls to the studios.
+    // The menu badge: the last daily reading, no calls to the studios.
     if (req.query.summary) {
       const sq = await pool.query(
         `SELECT COALESCE(SUM(k.stale_count),0)::int AS stale, COALESCE(SUM(k.bad_count),0)::int AS bad,
@@ -3274,10 +3274,10 @@ app.listen(PORT, '0.0.0.0', () => {
     // UPTIME_MONITOR=off for a local run pointed at the real database, so it
     // doesn't check (and email) alongside production.
     if (String(process.env.UPTIME_MONITOR || '').toLowerCase() !== 'off') uptimeMonitor.start();
-    // Kora health: first check two minutes after start, then hourly.
+    // Kora health: once a day at 5pm Edmonton time (koraAlert.RUN_HOUR / RUN_TZ).
     if (String(process.env.KORA_HEALTH_ALERTS || '').toLowerCase() !== 'off') {
-      setTimeout(koraHealthCheckAll, 120000);
-      setInterval(koraHealthCheckAll, koraAlert.INTERVAL_MS);
+      const next = () => setTimeout(() => { koraHealthCheckAll().finally(next); }, koraAlert.msUntilNextRun());
+      next();
     }
   }).catch(e => {
     console.error('Failed to initialize database:', e);

@@ -1875,7 +1875,7 @@ function renderUptime_() {
   if (!r.emailConfigured) { msg.textContent = 'Email is not configured on the server (RESEND_API_KEY unset) — alerts are recorded but not sent.'; msg.style.color = 'var(--danger)'; }
 }
 
-// Kora issues for the menu badge, from the hourly check (so it shows from any
+// Kora issues for the menu badge, from the daily check (so it shows from any
 // page, and opening the menu never calls every studio).
 async function refreshKoraBadge_() {
   if (!canSee('korahealth')) return;
@@ -2757,7 +2757,7 @@ async function loadPushSettings() {
     row('push_new_ticket', 'Push me when a ticket arrives', 'Any studio you can see — this is the one that matters.') +
     row('push_user_reply', 'Push me when someone replies', 'A reply on a ticket you are already in.') +
     (canSee('uptime') ? row('push_uptime', 'Push me when a site goes down', 'And again when it is back up. Same moments as the uptime emails.') : '') +
-    (canSee('korahealth') ? row('push_kora', 'Push me when Kora needs attention', 'New thumbs-down answers, or help topics that went out of date (checked hourly; a weekly reminder while they stay out of date).') : '') +
+    (canSee('korahealth') ? row('push_kora', 'Push me when Kora needs attention', 'New thumbs-down answers, or help topics that went out of date. Checked daily at 5pm, with a weekly reminder while topics stay out of date.') : '') +
     row('email_new_ticket', 'Email me as well', 'Independent of push. Off means push only.') +
     (r.enabled ? '' : '<p style="font-size:12.5px;color:var(--danger,#b91c1c);margin-top:8px;">Push is not configured on the server (VAPID keys unset) — email only until it is.</p>');
 

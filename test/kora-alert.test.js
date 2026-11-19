@@ -25,11 +25,18 @@ ok(d.alerts.length === 0, 'a thumbs-down ageing out of the week: quiet');
 d = decide(null, { staleCount: 0, badCount: 0 }, now);
 ok(d.alerts.length === 0, 'all good: quiet');
 
+// Daily at 5pm Edmonton.
+const { msUntilNextRun } = require('../lib/koraAlert');
+const at = (iso) => Date.parse(iso);
+ok(msUntilNextRun(at('2026-11-19T22:00:00Z')) === 60 * 60000, '4pm local (UTC-6): an hour to go');
+ok(msUntilNextRun(at('2026-11-19T23:30:00Z')) === 23.5 * 3600000, '5:30pm: tomorrow at 5');
+ok(msUntilNextRun(at('2026-11-19T06:00:00Z')) === 17 * 3600000, 'midnight: 17 hours');
+
 const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8').replace(/\r\n/g, '\n');
 const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8').replace(/\r\n/g, '\n');
 ok(/kora: 'push_kora'/.test(server) && /kora: \['korahealth'\]/.test(server), 'pushes go only to people who can open Kora Health, and each can mute them');
 ok(/'push_uptime', 'push_kora', 'email_new_ticket'/.test(server) && /COALESCE\(push_kora,TRUE\) AS push_kora/.test(server), 'the mute switch reads and saves');
-ok(/setInterval\(koraHealthCheckAll, koraAlert\.INTERVAL_MS\)/.test(server) && /pg_try_advisory_lock\(\$1\) AS ok', \[koraAlert\.LOCK_KEY\]/.test(server), 'hourly, one checker at a time');
+ok(/koraAlert\.msUntilNextRun\(\)/.test(server) &&/pg_try_advisory_lock\(\$1\) AS ok', \[koraAlert\.LOCK_KEY\]/.test(server), 'daily at 5pm, one checker at a time');
 ok(/if \(req\.query\.summary\)/.test(server), 'the badge reads the stored reading (same route the control plane already allows)');
 ok(/id="koraBadge"/.test(page) && /function refreshKoraBadge_\(\)/.test(page) && /row\('push_kora'/.test(page), 'menu badge and push setting on the page');
 ok(/help topic' \+ \(stale\.length === 1 \? '' : 's'\) \+ ' out of date'/.test(page) && /<b>Out of date:<\/b>/.test(page), 'the page lists the out-of-date topics and what to do');
