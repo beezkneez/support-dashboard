@@ -426,6 +426,11 @@ async function initDB() {
     await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS email_new_ticket BOOLEAN DEFAULT TRUE`).catch(()=>{});
     await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS push_new_feature_request BOOLEAN DEFAULT TRUE`).catch(()=>{});
     await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS push_uptime BOOLEAN DEFAULT TRUE`).catch(()=>{});
+    // Kora health alerts (2026-11-19): the hourly check's last reading per studio.
+    await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS push_kora BOOLEAN DEFAULT TRUE`).catch(()=>{});
+    await client.query(`CREATE TABLE IF NOT EXISTS kora_health_state (
+      app_id INTEGER PRIMARY KEY, stale_count INTEGER NOT NULL DEFAULT 0, bad_count INTEGER NOT NULL DEFAULT 0,
+      stale_topics TEXT, checked_at TIMESTAMPTZ, last_stale_alert_at TIMESTAMPTZ)`).catch((e) => console.error('[kora health] state table:', e.message));
     // Support pages this person may open, as last reported by the Kronara
     // dashboard ("tickets,requests"). NULL = everything (admins, and anyone
     // who signs in here directly). Used to keep push to what they can see.
@@ -1776,9 +1781,9 @@ async function pushToAdmins(title, body, url, category, studioUrl) {
   try {
     // Preference is per admin, per category. An admin with push off for a
     // category simply has no rows returned for it.
-    const col = { ticket: 'push_new_ticket', reply: 'push_user_reply', feature_request: 'push_new_feature_request', uptime: 'push_uptime' }[category] || null;
+    const col = { ticket: 'push_new_ticket', reply: 'push_user_reply', feature_request: 'push_new_feature_request', uptime: 'push_uptime', kora: 'push_kora' }[category] || null;
     // Dashboard staff only hear about what they can open.
-    const need = { ticket: ['tickets'], reply: ['tickets', 'requests'], feature_request: ['requests'], uptime: ['uptime'] }[category] || null;
+    const need = { ticket: ['tickets'], reply: ['tickets', 'requests'], feature_request: ['requests'], uptime: ['uptime'], kora: ['korahealth'] }[category] || null;
     const pageOk = need
       ? `(a.dashboard_pages IS NULL OR string_to_array(a.dashboard_pages, ',') && ARRAY[${need.map(n => `'${n}'`).join(',')}]::text[])`
       : 'TRUE';
@@ -1866,6 +1871,7 @@ app.get('/api/push/devices', requireAdmin, async (req, res) => {
       `SELECT COALESCE(push_new_ticket,TRUE) AS push_new_ticket,
               COALESCE(push_user_reply,TRUE) AS push_user_reply,
               COALESCE(push_uptime,TRUE) AS push_uptime,
+              COALESCE(push_kora,TRUE) AS push_kora,
               COALESCE(email_new_ticket,TRUE) AS email_new_ticket
          FROM admin_users WHERE id=$1`, [req.admin.id]);
     res.json({ ok: true, enabled: PUSH_READY, devices: r.rows, prefs: a.rows[0] || {} });
@@ -1878,7 +1884,7 @@ app.get('/api/push/devices', requireAdmin, async (req, res) => {
 // new ticket but not an email, or both, or neither while you are away.
 app.post('/api/push/prefs', requireAdmin, async (req, res) => {
   try {
-    const allowed = ['push_new_ticket', 'push_user_reply', 'push_uptime', 'email_new_ticket'];
+    const allowed = ['push_new_ticket', 'push_user_reply', 'push_uptime', 'push_kora', 'email_new_ticket'];
     const sets = [], vals = [];
     for (const k of allowed) {
       if (typeof req.body[k] === 'boolean') { sets.push(`${k}=$${sets.length + 1}`); vals.push(req.body[k]); }
@@ -2738,43 +2744,86 @@ app.post('/api/apps', requireAdmin, async (req, res) => {
 // unreachable spawn must not blank out the rest, so this fetches all of them
 // in parallel and reports per-app success/failure rather than failing the
 // whole request.
+async function koraHealthFor(a) {
+  const base = { id: a.id, name: a.name, slug: a.slug, color: a.color, callback_url: a.callback_url };
+  let httpStatus = 0, raw = '', r;
+  try {
+    const resp = await fetch(a.callback_url.replace(/\/$/, '') + '/api/hooks/koraHealth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': a.api_key },
+      body: JSON.stringify({}),
+      signal: AbortSignal.timeout(20000),
+    });
+    httpStatus = resp.status;
+    raw = await resp.text();
+    if ((resp.headers.get('content-type') || '').includes('application/json')) {
+      try { r = JSON.parse(raw); } catch (_) { r = null; }
+    }
+  } catch (err) {
+    return { ...base, ok: false, error: 'Could not reach that studio (' + err.message + ').' };
+  }
+  if (!r) {
+    const looksLikeAnErrorPage = /^\s*<(!doctype|html)/i.test(raw);
+    const error = httpStatus === 404
+      ? 'That studio is on an older build that does not have this endpoint yet.'
+      : looksLikeAnErrorPage
+        ? 'That studio returned a web page instead of an answer (HTTP ' + httpStatus + ') -- probably restarting.'
+        : 'That studio gave an unreadable reply (HTTP ' + httpStatus + ').';
+    return { ...base, ok: false, error };
+  }
+  if (!r.ok) return { ...base, ok: false, error: r.reason || 'That studio refused the request.' };
+  return { ...base, ok: true, badCount7d: r.badCount7d || 0, bad: r.bad || [], driftStale: r.driftStale || [] };
+}
+
+// The daily check (2026-11-19, 5pm): ask every studio, keep the reading, push to
+// admins who can open Kora Health when it gets worse (lib/koraAlert.js).
+async function koraHealthCheckAll() {
+  const client = await pool.connect();
+  try {
+    const got = (await client.query('SELECT pg_try_advisory_lock($1) AS ok', [koraAlert.LOCK_KEY])).rows[0];
+    if (!got || !got.ok) return;
+    try {
+      const apps = (await client.query(`SELECT id, name, slug, color, api_key, callback_url FROM apps WHERE callback_url IS NOT NULL AND callback_url <> '' ORDER BY name`)).rows;
+      for (const a of apps) {
+        const h = await koraHealthFor(a);
+        if (!h.ok) continue;   // unreachable is the uptime monitor's job
+        const prev = (await client.query(`SELECT stale_count AS "staleCount", bad_count AS "badCount", last_stale_alert_at AS "lastStaleAlertAt" FROM kora_health_state WHERE app_id=$1`, [a.id])).rows[0] || null;
+        const d = koraAlert.decide(prev, { staleCount: h.driftStale.length, badCount: h.badCount7d }, Date.now(), a.name);
+        await client.query(`INSERT INTO kora_health_state (app_id, stale_count, bad_count, stale_topics, checked_at, last_stale_alert_at)
+            VALUES ($1,$2,$3,$4,NOW(), CASE WHEN $5 THEN NOW() ELSE NULL END)
+          ON CONFLICT (app_id) DO UPDATE SET stale_count=$2, bad_count=$3, stale_topics=$4, checked_at=NOW(),
+            last_stale_alert_at = CASE WHEN $5 THEN NOW() WHEN $2 = 0 THEN NULL ELSE kora_health_state.last_stale_alert_at END`,
+          [a.id, h.driftStale.length, h.badCount7d, h.driftStale.join(', ').slice(0, 2000), d.staleAlerted]);
+        for (const al of d.alerts) {
+          console.log('[kora health] alert', a.name, al.kind, al.title);
+          await pushToAdmins(al.title, al.body, '/#korahealth', 'kora', a.callback_url).catch(() => {});
+        }
+      }
+    } finally { await client.query('SELECT pg_advisory_unlock($1)', [koraAlert.LOCK_KEY]).catch(() => {}); }
+  } catch (e) { console.error('[kora health] check:', e.message); }
+  finally { client.release(); }
+}
+
 app.get('/api/koraHealth', requireAdmin, async (req, res) => {
   try {
+    // The menu badge: the last daily reading, no calls to the studios.
+    if (req.query.summary) {
+      const sq = await pool.query(
+        `SELECT COALESCE(SUM(k.stale_count),0)::int AS stale, COALESCE(SUM(k.bad_count),0)::int AS bad,
+                COUNT(*) FILTER (WHERE k.stale_count > 0 OR k.bad_count > 0)::int AS studios
+           FROM kora_health_state k JOIN apps a ON a.id = k.app_id
+          WHERE a.callback_url IS NOT NULL AND a.callback_url <> ''
+          ${bridgeScope(req) ? `AND ${HOST_SQL('a.callback_url')} = ANY($1)` : ''}`,
+        bridgeScope(req) ? [bridgeScope(req)] : []);
+      return res.json({ ok: true, ...sq.rows[0] });
+    }
     const q = await pool.query(
       `SELECT id, name, slug, color, api_key, callback_url FROM apps
         WHERE callback_url IS NOT NULL AND callback_url <> ''
         ${bridgeScope(req) ? `AND ${HOST_SQL('callback_url')} = ANY($1)` : ''} ORDER BY name`,
       bridgeScope(req) ? [bridgeScope(req)] : []
     );
-    const apps = await Promise.all(q.rows.map(async (a) => {
-      const base = { id: a.id, name: a.name, slug: a.slug, color: a.color };
-      let httpStatus = 0, raw = '', r;
-      try {
-        const resp = await fetch(a.callback_url.replace(/\/$/, '') + '/api/hooks/koraHealth', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-API-Key': a.api_key },
-          body: JSON.stringify({}),
-        });
-        httpStatus = resp.status;
-        raw = await resp.text();
-        if ((resp.headers.get('content-type') || '').includes('application/json')) {
-          try { r = JSON.parse(raw); } catch (_) { r = null; }
-        }
-      } catch (err) {
-        return { ...base, ok: false, error: 'Could not reach that studio (' + err.message + ').' };
-      }
-      if (!r) {
-        const looksLikeAnErrorPage = /^\s*<(!doctype|html)/i.test(raw);
-        const error = httpStatus === 404
-          ? 'That studio is on an older build that does not have this endpoint yet.'
-          : looksLikeAnErrorPage
-            ? 'That studio returned a web page instead of an answer (HTTP ' + httpStatus + ') -- probably restarting.'
-            : 'That studio gave an unreadable reply (HTTP ' + httpStatus + ').';
-        return { ...base, ok: false, error };
-      }
-      if (!r.ok) return { ...base, ok: false, error: r.reason || 'That studio refused the request.' };
-      return { ...base, ok: true, badCount7d: r.badCount7d || 0, bad: r.bad || [], driftStale: r.driftStale || [] };
-    }));
+    const apps = (await Promise.all(q.rows.map(koraHealthFor))).map(({ callback_url, ...x }) => x);
     res.json({ ok: true, apps });
   } catch (e) {
     console.error('[koraHealth]', e.message);
@@ -2980,6 +3029,7 @@ app.delete('/api/tenants/:id', requireAdmin, async (req, res) => {
 // ── Uptime monitor ──────────────────────────────────────────────────
 // Checker + rules live in lib/uptime.js; this is the page's API and the seed.
 const uptime = require('./lib/uptime');
+const koraAlert = require('./lib/koraAlert');
 
 // Spawns are checked at /api/known-features: public, no auth, no database,
 // ~2.5 KB of static JSON. Their "/" also works but is the whole ~6.6 MB staff
@@ -3231,6 +3281,11 @@ app.listen(PORT, '0.0.0.0', () => {
     // UPTIME_MONITOR=off for a local run pointed at the real database, so it
     // doesn't check (and email) alongside production.
     if (String(process.env.UPTIME_MONITOR || '').toLowerCase() !== 'off') uptimeMonitor.start();
+    // Kora health: once a day at 5pm Edmonton time (koraAlert.RUN_HOUR / RUN_TZ).
+    if (String(process.env.KORA_HEALTH_ALERTS || '').toLowerCase() !== 'off') {
+      const next = () => setTimeout(() => { koraHealthCheckAll().finally(next); }, koraAlert.msUntilNextRun());
+      next();
+    }
   }).catch(e => {
     console.error('Failed to initialize database:', e);
   });
