@@ -1410,7 +1410,9 @@ async function sendNote(ticketId) {
 }
 
 async function updateTicket(id, field, value) {
-  await api('PATCH', `/api/tickets/${id}`, { [field]: value });
+  const r = await api('PATCH', `/api/tickets/${id}`, { [field]: value });
+  // Resolved or closed: done with it, so back to the list (Jud, 2026-11-25).
+  if (r && r.ok !== false && field === 'status' && (value === 'resolved' || value === 'closed')) showPage('tickets');
 }
 
 async function deleteTicket(id) {
