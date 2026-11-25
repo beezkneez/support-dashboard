@@ -1024,7 +1024,7 @@ app.post('/api/hooks/ticket', requireApiKey, async (req, res) => {
     );
 
     // Notify admin via email
-    const dashUrl = process.env.DASHBOARD_URL || 'http://localhost:4500';
+    const dashUrl = dashboardLinkUrl();
     sendMail({
       to: process.env.ADMIN_EMAIL,
       subject: `[${req.app.name}] ${type === 'bug' ? '🐛 Bug' : '💬 Message'}: ${subject || '(no subject)'}`,
@@ -1360,7 +1360,7 @@ app.post('/api/hooks/ticketPassBack', requireApiKey, async (req, res) => {
           <p><strong>${passedBackBy || 'The studio'}</strong> could not answer this one.</p>
           ${note ? `<div style="white-space:pre-wrap;background:#f8fafc;padding:12px;border-radius:6px;">${note}</div>` : ''}
           <p><strong>Subject:</strong> ${t.subject || '(none)'}</p>
-          <p style="margin-top:16px;"><a href="${process.env.DASHBOARD_URL || ''}" style="display:inline-block;background:#6366f1;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;">Open the dashboard</a></p>
+          <p style="margin-top:16px;"><a href="${dashboardLinkUrl()}" style="display:inline-block;background:#6366f1;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;">Open the dashboard</a></p>
         </div></div>`
     }).catch(() => {});
   } catch (e) {
@@ -1428,7 +1428,7 @@ app.post('/api/hooks/ticketStale', requireApiKey, async (req, res) => {
              ${days ? days + ' days ago' : 'a while ago'} and nobody there has replied.</p>
           <p><strong>Subject:</strong> ${subject || t.subject || '(none)'}</p>
           <p>It is still theirs — this is only so it does not sit unnoticed. Chase them, or take it on.</p>
-          <p style="margin-top:16px;"><a href="${process.env.DASHBOARD_URL || ''}" style="display:inline-block;background:#b45309;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;">Open the dashboard</a></p>
+          <p style="margin-top:16px;"><a href="${dashboardLinkUrl()}" style="display:inline-block;background:#b45309;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;">Open the dashboard</a></p>
         </div></div>`
     });
   } catch (e) {
@@ -3036,6 +3036,14 @@ const koraAlert = require('./lib/koraAlert');
 // app — once a minute per site that is gigabytes a day for no extra signal.
 const UPTIME_SPAWN_PATH = '/api/known-features';
 const UPTIME_DEFAULT_ALERT_TO = 'admin@kronara.app';
+// Where email buttons send a person: support inside the Kronara dashboard
+// (behind its Cloudflare sign-in), not this app's own Railway address (Jud,
+// 2026-11-25). DASHBOARD_URL stays this app's own address for the uptime
+// self-check below, which can't pass the dashboard's sign-in.
+function dashboardLinkUrl() {
+  const u = String(process.env.DASHBOARD_LINK_URL || '').replace(/\/+$/, '');
+  return /^https:\/\//i.test(u) ? u : 'https://dashboard.kronara.app/support';
+}
 function uptimeSelfUrl() {
   const u = String(process.env.DASHBOARD_URL || '').replace(/\/+$/, '');
   return /^https:\/\//i.test(u) ? u : 'https://support-dashboard-production-72c8.up.railway.app';
